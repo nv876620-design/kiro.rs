@@ -7,10 +7,11 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_app_config, get_credential_balance, get_load_balancing_mode, get_metrics,
-        get_timeseries, reset_failure_count, set_credential_disabled, set_credential_name,
-        set_credential_priority, set_load_balancing_mode, update_app_config,
+        add_credential, delete_credential, export_credentials, force_refresh_token,
+        get_all_credentials, get_app_config, get_available_models, get_credential_balance,
+        get_load_balancing_mode, get_metrics, get_timeseries, import_credentials,
+        reset_failure_count, set_credential_disabled, set_credential_name, set_credential_priority,
+        set_load_balancing_mode, update_app_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -26,6 +27,8 @@ use super::{
 /// - `POST /credentials/:id/reset` - 重置失败计数
 /// - `POST /credentials/:id/refresh` - 强制刷新 Token
 /// - `GET /credentials/:id/balance` - 获取凭据余额
+/// - `GET /credentials/export` - 导出全部凭据（含 secrets，用于备份/迁移）
+/// - `POST /credentials/import` - 批量导入凭据（重复自动跳过）
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 ///
@@ -48,11 +51,14 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
+        .route("/credentials/export", get(export_credentials))
+        .route("/credentials/import", post(import_credentials))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),
         )
         .route("/config/app", get(get_app_config).put(update_app_config))
+        .route("/config/available-models", get(get_available_models))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

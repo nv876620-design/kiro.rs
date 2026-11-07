@@ -258,6 +258,7 @@ async fn handle_stream_request(
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive")
+        .header("x-accel-buffering", "no")
         .body(Body::from_stream(stream))
         .unwrap()
 }
@@ -616,6 +617,31 @@ pub(crate) fn map_provider_error(err: Error, passthrough_retry_after: bool) -> R
 
     if let Some(api_err) = err.downcast_ref::<crate::kiro::provider::UpstreamApiError>() {
         match api_err.status {
+            400 if api_err.message.contains("INVALID_MODEL_ID") => {
+                let detail = api_err
+                    .message
+                    .find('{')
+                    .and_then(|i| {
+                        serde_json::from_str::<serde_json::Value>(&api_err.message[i..]).ok()
+                    })
+                    .and_then(|v| {
+                        v.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "Kiro rejected the model ID.".to_string());
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new(
+                        "invalid_request_error",
+                        format!(
+                            "{} Use GET /v1/models to list supported models.",
+                            detail
+                        ),
+                    )),
+                )
+                    .into_response();
+            }
             429 => {
                 let mut resp = (
                     StatusCode::TOO_MANY_REQUESTS,

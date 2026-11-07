@@ -50,6 +50,28 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 
+    /// OAuth / SSO Provider（如 BuilderId / Enterprise / AzureAD）
+    ///
+    /// KAM / ZyphrZero 导入时用它区分 BuilderId 与 Enterprise/External IdP。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// External IdP / Enterprise SSO 的 start URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_url: Option<String>,
+
+    /// External IdP 的 token endpoint
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+
+    /// External IdP 的 issuer URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+
+    /// External IdP 请求的 scopes（空格分隔）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+
     /// 凭据优先级（数字越小优先级越高，默认为 0）
     #[serde(default)]
     #[serde(skip_serializing_if = "is_zero")]
@@ -285,11 +307,53 @@ impl KiroCredentials {
             .unwrap_or(config.effective_auth_region())
     }
 
+    /// Get the region declared by the real CodeWhisperer profile ARN.
+    ///
+    /// Enterprise / IdC data-plane requests must hit the endpoint in the same
+    /// region as the profile. Returns None when the ARN is missing, a
+    /// BuilderID placeholder, or malformed (upstream fix: align API region
+    /// with profile ARN, refs #93).
+    fn profile_arn_region(&self) -> Option<&str> {
+        let arn = self.profile_arn.as_deref()?;
+        let arn = arn.trim();
+        if arn.is_empty() {
+            return None;
+        }
+        let mut parts = arn.split(':');
+        let (arn_tag, partition, service, region, account, resource) = (
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+        );
+        if parts.next().is_some()
+            || arn_tag != "arn"
+            || partition.is_empty()
+            || service != "codewhisperer"
+            || region.is_empty()
+            || account.is_empty()
+            || !resource.starts_with("profile/")
+            || resource.len() == "profile/".len()
+        {
+            return None;
+        }
+        // self.profile_arn borrows self; returning &str tied to &self is safe
+        // because region is a substring slice of the stored String.
+        self.profile_arn
+            .as_deref()
+            .and_then(|full| full.split(':').nth(3))
+            .filter(|r| !r.is_empty())
+    }
+
     /// 获取有效的 API Region（用于 API 请求）
-    /// 优先级：凭据.api_region > config.api_region > config.region
+    /// 优先级：凭据.api_region > 真实 profileArn Region > config.api_region > config.region
+    /// （凭据.region 不参与 api_region 回退链；profile ARN region 是 upstream fix #93）
     pub fn effective_api_region<'a>(&'a self, config: &'a Config) -> &'a str {
         self.api_region
             .as_deref()
+            .or_else(|| self.profile_arn_region())
             .unwrap_or(config.effective_api_region())
     }
 
@@ -439,6 +503,11 @@ mod tests {
             kind: None,
             base_url: None,
             upstream_api_key: None,
+            provider: None,
+            start_url: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -561,6 +630,11 @@ mod tests {
             kind: None,
             base_url: None,
             upstream_api_key: None,
+            provider: None,
+            start_url: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -596,6 +670,11 @@ mod tests {
             kind: None,
             base_url: None,
             upstream_api_key: None,
+            provider: None,
+            start_url: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -714,6 +793,11 @@ mod tests {
             kind: None,
             base_url: None,
             upstream_api_key: None,
+            provider: None,
+            start_url: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
         };
 
         let json = original.to_pretty_json().unwrap();
@@ -902,6 +986,58 @@ mod tests {
         creds.region = Some("cred-region".to_string());
 
         assert_eq!(creds.effective_api_region(&config), "config-region");
+    }
+
+    #[test]
+    fn test_effective_api_region_prefers_real_profile_arn_region() {
+        // Upstream fix #93: real profile ARN region wins over config when no
+        // explicit credential api_region is set.
+        let cred: KiroCredentials = serde_json::from_str(
+            r#"{
+                "region": "eu-west-1",
+                "profileArn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/REAL123"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cred.effective_api_region(&Config::default()),
+            "us-east-1"
+        );
+    }
+
+    #[test]
+    fn test_effective_api_region_ignores_malformed_profile_arn() {
+        for profile_arn in [
+            "arn:aws:other-service:us-east-1:123456789012:profile/REAL123",
+            "arn:aws:codewhisperer:us-east-1:123456789012:resource/REAL123",
+            "arn:aws:codewhisperer::123456789012:profile/REAL123",
+            "arn:aws:codewhisperer:us-east-1:123456789012:profile/",
+        ] {
+            let cred: KiroCredentials = serde_json::from_value(serde_json::json!({
+                "region": "eu-west-1",
+                "profileArn": profile_arn,
+            }))
+            .unwrap();
+            assert_eq!(
+                cred.effective_api_region(&Config::default()),
+                Config::default().effective_api_region()
+            );
+        }
+    }
+
+    #[test]
+    fn test_effective_api_region_explicit_api_region_wins_over_profile_arn() {
+        let cred: KiroCredentials = serde_json::from_str(
+            r#"{
+                "apiRegion": "eu-central-1",
+                "profileArn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/REAL123"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cred.effective_api_region(&Config::default()),
+            "eu-central-1"
+        );
     }
 
     #[test]

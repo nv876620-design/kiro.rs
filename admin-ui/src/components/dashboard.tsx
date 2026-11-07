@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, Settings, Activity, KeyRound, FileText, Github, DownloadCloud } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, FileDown, Trash2, RotateCcw, CheckCircle2, Settings, Activity, KeyRound, FileText, Github, DownloadCloud } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
+import { normalizeCredentialImportItems } from '@/lib/credential-import'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -19,8 +20,8 @@ import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-
 import { SettingsDialog } from '@/components/settings-dialog'
 import { LogPanel } from '@/components/log-panel'
 import { isDesktop, checkUpdate, getAppVersion, openUrl, type UpdateInfo } from '@/lib/desktop'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
-import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useImportCredentials } from '@/hooks/use-credentials'
+import { getCredentialBalance, forceRefreshToken, exportCredentials } from '@/api/credentials'
 import type { LoadBalancingMode } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
@@ -29,16 +30,16 @@ interface DashboardProps {
   onLogout: () => void
 }
 
-// 主视图分组：实时监控 / 凭据管理
-// 「日志」Tab 仅在桌面壳（Tauri）中出现
+// Main view groups: Monitor / Credentials
+// "Logs" tab only appears in desktop shell (Tauri)
 const DESKTOP = isDesktop()
 
 type MainTab = 'monitor' | 'credentials' | 'logs'
 
 const MAIN_TABS: TabItem[] = [
-  { value: 'monitor', label: '实时监控', icon: Activity },
-  { value: 'credentials', label: '凭据管理', icon: KeyRound },
-  ...(DESKTOP ? [{ value: 'logs', label: '日志', icon: FileText } as TabItem] : []),
+  { value: 'monitor', label: 'Monitor', icon: Activity },
+  { value: 'credentials', label: 'Credentials', icon: KeyRound },
+  ...(DESKTOP ? [{ value: 'logs', label: 'Logs', icon: FileText } as TabItem] : []),
 ]
 
 export function Dashboard({ onLogout }: DashboardProps) {
@@ -63,8 +64,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
+  const [importingFile, setImportingFile] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const cancelVerifyRef = useRef(false)
-  // 桌面版首次打开窗口后自动查询一次凭据信息，仅触发一次
+  // Desktop: auto-query credential info once on first window open
   const autoQueriedRef = useRef(false)
   const [mainTab, setMainTab] = useState<MainTab>('monitor')
   const [currentPage, setCurrentPage] = useState(1)
@@ -80,10 +83,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data, isLoading, error, refetch } = useCredentials()
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
+  const { mutateAsync: importFromFile } = useImportCredentials()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
 
-  // 计算分页
+  // Compute pagination
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
   const startIndex = (currentPage - 1) * itemsPerPage
   const endIndex = startIndex + itemsPerPage
@@ -94,12 +98,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
     return Boolean(credential?.disabled)
   }).length
 
-  // 当凭据列表变化时重置到第一页
+  // Reset to the first page when the credential list changes
   useEffect(() => {
     setCurrentPage(1)
   }, [data?.credentials.length])
 
-  // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
+  // Keep only caches for credentials that still exist, avoiding stale data left behind after deletion
   useEffect(() => {
     if (!data?.credentials) {
       setBalanceMap(new Map())
@@ -111,13 +115,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     setBalanceMap(prev => {
       const next = new Map<number, BalanceResponse>()
-      // 保留仍存在凭据的已有余额（含手动查询结果）
+      // Keep existing balances for credentials that still exist (including manual query results)
       prev.forEach((value, id) => {
         if (validIds.has(id)) {
           next.set(id, value)
         }
       })
-      // 用后端带回的缓存余额补齐尚未加载的项（刷新页面后免手动查询即可展示）
+      // Fill in not-yet-loaded entries with the cached balance returned by the backend (shown after a page refresh without a manual query)
       let changed = next.size !== prev.size
       data.credentials.forEach(credential => {
         if (credential.cachedBalance && !next.has(credential.id)) {
@@ -142,8 +146,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }, [data?.credentials])
 
-  // 桌面版：首次拿到凭据列表后自动静默查询一次当前页信息（用量）。
-  // 后端 balance 接口带 300s 缓存，重复开窗不会频繁打上游；autoQueriedRef 保证整个会话只自动触发一次。
+  // Desktop: after the credential list first arrives, silently query the current page info (usage) once.
+  // The backend balance endpoint has a 300s cache, so reopening the window doesn't hammer upstream; autoQueriedRef ensures the auto-trigger runs only once per session.
   useEffect(() => {
     if (!DESKTOP) return
     if (autoQueriedRef.current) return
@@ -166,7 +170,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const handleRefresh = () => {
     refetch()
-    toast.success('已刷新凭据列表')
+    toast.success('Credentials list refreshed')
   }
 
   const handleLogout = () => {
@@ -175,13 +179,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
     onLogout()
   }
 
-  // 打开新版下载页
+  // Open new version download page
   const openReleasePage = (info: UpdateInfo) => {
-    openUrl(info.releaseUrl).catch((e) => toast.error(`打开失败: ${extractErrorMessage(e)}`))
+    openUrl(info.releaseUrl).catch((e) => toast.error(`Failed to open: ${extractErrorMessage(e)}`))
   }
 
-  // 检查更新：请求 GitHub 最新 release，结果存入 updateInfo（驱动按钮变绿）。
-  // silent=true 为启动时自动检查：仅在有新版时弹提示，无更新/失败都不打扰。
+  // Check for updates: request GitHub latest release, store result in updateInfo (drives button color).
+  // silent=true for startup auto-check: only toast on new version, no toast on no-update/failure.
   const handleCheckUpdate = async (silent = false) => {
     if (checkingUpdate) return
     setCheckingUpdate(true)
@@ -189,36 +193,36 @@ export function Dashboard({ onLogout }: DashboardProps) {
       const info = await checkUpdate()
       if (!info) return
       setUpdateInfo(info)
-      // 静默检查（启动时）不弹任何 toast，只靠按钮变绿提示；手动点击才弹
+      // Silent check (startup) shows no toast, only button turns green; manual click shows toast
       if (silent) return
       if (info.hasUpdate) {
-        toast.success(`发现新版本 ${info.latestVersion}（当前 ${info.currentVersion}）`, {
-          description: '点击前往下载页',
-          action: { label: '去下载', onClick: () => openReleasePage(info) },
+        toast.success(`New version ${info.latestVersion} available (current ${info.currentVersion})`, {
+          description: 'Click to go to download page',
+          action: { label: 'Download', onClick: () => openReleasePage(info) },
           duration: 10000,
         })
       } else {
-        toast.success(`已是最新版本（${info.currentVersion}）`)
+        toast.success(`Already on latest version (${info.currentVersion})`)
       }
     } catch (e) {
-      if (!silent) toast.error(`检查更新失败: ${extractErrorMessage(e)}`)
+      if (!silent) toast.error(`Update check failed: ${extractErrorMessage(e)}`)
     } finally {
       setCheckingUpdate(false)
     }
   }
 
-  // 启动后自动静默检查一次更新 + 读取当前版本（仅桌面版）
+  // On startup, silently check for updates once and read the current version (desktop only)
   useEffect(() => {
     if (!DESKTOP) return
     handleCheckUpdate(true)
     getAppVersion()
       .then(setAppVersion)
       .catch(() => {})
-    // 仅首次挂载时执行
+    // Run only on the first mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 选择管理
+  // Selection management
   const toggleSelect = (id: number) => {
     const newSelected = new Set(selectedIds)
     if (newSelected.has(id)) {
@@ -233,10 +237,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setSelectedIds(new Set())
   }
 
-  // 批量删除（仅删除已禁用项）
+  // Batch delete (only disabled items)
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要删除的凭据')
+      toast.error('Please select credentials to delete first')
       return
     }
 
@@ -246,14 +250,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
 
     if (disabledIds.length === 0) {
-      toast.error('选中的凭据中没有已禁用项')
+      toast.error('No disabled credentials in selection')
       return
     }
 
     const skippedCount = selectedIds.size - disabledIds.length
-    const skippedText = skippedCount > 0 ? `（将跳过 ${skippedCount} 个未禁用凭据）` : ''
+    const skippedText = skippedCount > 0 ? ` (will skip ${skippedCount} non-disabled)` : ''
 
-    if (!confirm(`确定要删除 ${disabledIds.length} 个已禁用凭据吗？此操作无法撤销。${skippedText}`)) {
+    if (!confirm(`Delete ${disabledIds.length} disabled credentials? This cannot be undone.${skippedText}`)) {
       return
     }
 
@@ -275,25 +279,25 @@ export function Dashboard({ onLogout }: DashboardProps) {
           })
         })
       } catch (error) {
-        // 错误已在 onError 中处理
+        // Error handled in onError
       }
     }
 
-    const skippedResultText = skippedCount > 0 ? `，已跳过 ${skippedCount} 个未禁用凭据` : ''
+    const skippedResultText = skippedCount > 0 ? `, skipped ${skippedCount} non-disabled` : ''
 
     if (failCount === 0) {
-      toast.success(`成功删除 ${successCount} 个已禁用凭据${skippedResultText}`)
+      toast.success(`Deleted ${successCount} disabled credentials${skippedResultText}`)
     } else {
-      toast.warning(`删除已禁用凭据：成功 ${successCount} 个，失败 ${failCount} 个${skippedResultText}`)
+      toast.warning(`Delete disabled: ${successCount} succeeded, ${failCount} failed${skippedResultText}`)
     }
 
     deselectAll()
   }
 
-  // 批量恢复异常
+  // Batch reset failures
   const handleBatchResetFailure = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要恢复的凭据')
+      toast.error('Please select credentials to reset first')
       return
     }
 
@@ -303,7 +307,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
 
     if (failedIds.length === 0) {
-      toast.error('选中的凭据中没有失败的凭据')
+      toast.error('No failed credentials in selection')
       return
     }
 
@@ -325,23 +329,23 @@ export function Dashboard({ onLogout }: DashboardProps) {
           })
         })
       } catch (error) {
-        // 错误已在 onError 中处理
+        // Error handled in onError
       }
     }
 
     if (failCount === 0) {
-      toast.success(`成功恢复 ${successCount} 个凭据`)
+      toast.success(`Reset ${successCount} credentials`)
     } else {
-      toast.warning(`成功 ${successCount} 个，失败 ${failCount} 个`)
+      toast.warning(`${successCount} succeeded, ${failCount} failed`)
     }
 
     deselectAll()
   }
 
-  // 批量刷新 Token
+  // Batch force refresh tokens
   const handleBatchForceRefresh = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要刷新的凭据')
+      toast.error('Please select credentials to refresh first')
       return
     }
 
@@ -351,7 +355,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
 
     if (enabledIds.length === 0) {
-      toast.error('选中的凭据中没有启用的凭据')
+      toast.error('No enabled credentials in selection')
       return
     }
 
@@ -375,29 +379,29 @@ export function Dashboard({ onLogout }: DashboardProps) {
     queryClient.invalidateQueries({ queryKey: ['credentials'] })
 
     if (failCount === 0) {
-      toast.success(`成功刷新 ${successCount} 个凭据的 Token`)
+      toast.success(`Refreshed tokens for ${successCount} credentials`)
     } else {
-      toast.warning(`刷新 Token：成功 ${successCount} 个，失败 ${failCount} 个`)
+      toast.warning(`Refresh tokens: ${successCount} succeeded, ${failCount} failed`)
     }
 
     deselectAll()
   }
 
-  // 一键清除所有已禁用凭据
+  // Clear all disabled credentials
   const handleClearAll = async () => {
     if (!data?.credentials || data.credentials.length === 0) {
-      toast.error('没有可清除的凭据')
+      toast.error('No credentials to clear')
       return
     }
 
     const disabledCredentials = data.credentials.filter(credential => credential.disabled)
 
     if (disabledCredentials.length === 0) {
-      toast.error('没有可清除的已禁用凭据')
+      toast.error('No disabled credentials to clear')
       return
     }
 
-    if (!confirm(`确定要清除所有 ${disabledCredentials.length} 个已禁用凭据吗？此操作无法撤销。`)) {
+    if (!confirm(`Clear all ${disabledCredentials.length} disabled credentials? This cannot be undone.`)) {
       return
     }
 
@@ -419,26 +423,87 @@ export function Dashboard({ onLogout }: DashboardProps) {
           })
         })
       } catch (error) {
-        // 错误已在 onError 中处理
+        // Error handled in onError
       }
     }
 
     if (failCount === 0) {
-      toast.success(`成功清除所有 ${successCount} 个已禁用凭据`)
+      toast.success(`Cleared all ${successCount} disabled credentials`)
     } else {
-      toast.warning(`清除已禁用凭据：成功 ${successCount} 个，失败 ${failCount} 个`)
+      toast.warning(`Clear disabled: ${successCount} succeeded, ${failCount} failed`)
     }
 
     deselectAll()
   }
 
-  // 查询当前页凭据信息（逐个查询，避免瞬时并发）
-  // silent=true 用于桌面版自动触发：不弹提示、无可查凭据时静默返回
+  // Export all credentials to a KAM / ZyphrZero compatible JSON file
+  // (includes secrets — keep it safe)
+  const handleExport = async () => {
+    try {
+      const file = await exportCredentials()
+      const count = file.accounts?.length ?? 0
+      if (count === 0) {
+        toast.error('No credentials to export')
+        return
+      }
+      const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const date = new Date().toISOString().slice(0, 10)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `kiro-accounts-${date}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success(`Exported ${count} credentials (file contains secrets — keep it safe)`)
+    } catch (error) {
+      toast.error('Export failed: ' + extractErrorMessage(error))
+    }
+  }
+
+  // Import credentials from a flat backup, KAM/ZyphrZero export, or credentials.json
+  const handleImportFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await file.text())
+    } catch (error) {
+      toast.error('Invalid JSON file: ' + extractErrorMessage(error))
+      return
+    }
+    const items = normalizeCredentialImportItems(parsed)
+    if (items.length === 0) {
+      toast.error('No credentials found in file')
+      return
+    }
+    setImportingFile(true)
+    try {
+      const result = await importFromFile(items as Record<string, unknown>[])
+      const failedMsg = result.failed.length > 0 ? `, ${result.failed.length} failed` : ''
+      if (result.failed.length === 0) {
+        toast.success(`Import finished: ${result.added} added, ${result.duplicates} duplicates${failedMsg}`)
+      } else {
+        const firstError = result.failed[0]?.error ?? 'unknown error'
+        toast.warning(`Import finished: ${result.added} added, ${result.duplicates} duplicates${failedMsg} (e.g. item #${(result.failed[0]?.index ?? 0) + 1}: ${firstError})`)
+      }
+      refetch()
+    } catch (error) {
+      toast.error('Import failed: ' + extractErrorMessage(error))
+    } finally {
+      setImportingFile(false)
+    }
+  }
+
+  // Query current page credential info (sequential to avoid burst)
+  // silent=true for desktop auto-trigger: no toast, silent return if no queryable
   const handleQueryCurrentPageInfo = async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false
 
     if (currentCredentials.length === 0) {
-      if (!silent) toast.error('当前页没有可查询的凭据')
+      if (!silent) toast.error('No queryable credentials on current page')
       return
     }
 
@@ -447,7 +512,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       .map(credential => credential.id)
 
     if (ids.length === 0) {
-      if (!silent) toast.error('当前页没有可查询的启用凭据')
+      if (!silent) toast.error('No enabled credentials on current page')
       return
     }
 
@@ -492,21 +557,21 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     if (!silent) {
       if (failCount === 0) {
-        toast.success(`查询完成：成功 ${successCount}/${ids.length}`)
+        toast.success(`Query done: ${successCount}/${ids.length} succeeded`)
       } else {
-        toast.warning(`查询完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+        toast.warning(`Query done: ${successCount} succeeded, ${failCount} failed`)
       }
     }
   }
 
-  // 批量验活
+  // Batch verify
   const handleBatchVerify = async () => {
     if (selectedIds.size === 0) {
-      toast.error('请先选择要验活的凭据')
+      toast.error('Please select credentials to verify first')
       return
     }
 
-    // 初始化状态
+    // Initialize state
     setVerifying(true)
     cancelVerifyRef.current = false
     const ids = Array.from(selectedIds)
@@ -514,7 +579,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     let successCount = 0
 
-    // 初始化结果，所有凭据状态为 pending
+    // Initialize results, all credentials as pending
     const initialResults = new Map<number, VerifyResult>()
     ids.forEach(id => {
       initialResults.set(id, { id, status: 'pending' })
@@ -522,17 +587,17 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setVerifyResults(initialResults)
     setVerifyDialogOpen(true)
 
-    // 开始验活
+    // Start verification
     for (let i = 0; i < ids.length; i++) {
-      // 检查是否取消
+      // Check if cancelled
       if (cancelVerifyRef.current) {
-        toast.info('已取消验活')
+        toast.info('Verification cancelled')
         break
       }
 
       const id = ids[i]
 
-      // 更新当前凭据状态为 verifying
+      // Update current credential status to verifying
       setVerifyResults(prev => {
         const newResults = new Map(prev)
         newResults.set(id, { id, status: 'verifying' })
@@ -543,7 +608,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         const balance = await getCredentialBalance(id)
         successCount++
 
-        // 更新为成功状态
+        // Update to success
         setVerifyResults(prev => {
           const newResults = new Map(prev)
           newResults.set(id, {
@@ -554,7 +619,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           return newResults
         })
       } catch (error) {
-        // 更新为失败状态
+        // Update to failed
         setVerifyResults(prev => {
           const newResults = new Map(prev)
           newResults.set(id, {
@@ -566,10 +631,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
         })
       }
 
-      // 更新进度
+      // Update progress
       setVerifyProgress({ current: i + 1, total: ids.length })
 
-      // 添加延迟防止封号（最后一个不需要延迟）
+      // Add delay to avoid rate limiting (skip for last item)
       if (i < ids.length - 1 && !cancelVerifyRef.current) {
         await new Promise(resolve => setTimeout(resolve, 2000))
       }
@@ -578,36 +643,36 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setVerifying(false)
 
     if (!cancelVerifyRef.current) {
-      toast.success(`验活完成：成功 ${successCount}/${ids.length}`)
+      toast.success(`Verification done: ${successCount}/${ids.length} succeeded`)
     }
   }
 
-  // 取消验活
+  // Cancel verification
   const handleCancelVerify = () => {
     cancelVerifyRef.current = true
     setVerifying(false)
   }
 
-  // 负载均衡模式：三种模式并排展示，点击直接切到目标模式
+  // Load balancing modes: three modes side by side, click to switch
   const loadBalancingModes: { value: LoadBalancingMode; label: string }[] = [
-    { value: 'priority', label: '优先级' },
-    { value: 'balanced', label: '均衡负载' },
-    { value: 'round-robin', label: '轮询' },
+    { value: 'priority', label: 'Priority' },
+    { value: 'balanced', label: 'Balanced' },
+    { value: 'round-robin', label: 'Round-robin' },
   ]
 
   const handleSetLoadBalancing = (newMode: LoadBalancingMode) => {
     if (newMode === loadBalancingData?.mode) return
     const modeNameMap: Record<string, string> = {
-      priority: '优先级模式',
-      balanced: '均衡负载模式',
-      'round-robin': '轮询模式',
+      priority: 'Priority mode',
+      balanced: 'Balanced mode',
+      'round-robin': 'Round-robin mode',
     }
     setLoadBalancingMode(newMode, {
       onSuccess: () => {
-        toast.success(`已切换到${modeNameMap[newMode] ?? newMode}`)
+        toast.success(`Switched to ${modeNameMap[newMode] ?? newMode}`)
       },
       onError: (error) => {
-        toast.error(`切换失败: ${extractErrorMessage(error)}`)
+        toast.error(`Switch failed: ${extractErrorMessage(error)}`)
       }
     })
   }
@@ -617,7 +682,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-          <p className="text-muted-foreground">加载中...</p>
+          <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
     )
@@ -628,11 +693,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <div className="min-h-screen flex items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
           <CardContent className="pt-6 text-center">
-            <div className="text-destructive mb-4">加载失败</div>
+            <div className="text-destructive mb-4">Load failed</div>
             <p className="text-muted-foreground mb-4">{(error as Error).message}</p>
             <div className="space-x-2">
-              <Button onClick={() => refetch()}>重试</Button>
-              <Button variant="outline" onClick={handleLogout}>重新登录</Button>
+              <Button onClick={() => refetch()}>Retry</Button>
+              <Button variant="outline" onClick={handleLogout}>Re-login</Button>
             </div>
           </CardContent>
         </Card>
@@ -642,7 +707,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* 顶部导航 */}
+      {/* Top navigation */}
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container flex h-14 items-center justify-between gap-3 px-4 md:px-8">
           <div className="flex items-center gap-3">
@@ -652,7 +717,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
               </div>
               <span className="hidden font-semibold sm:inline">Kiro Admin</span>
             </div>
-            {/* 主视图切换：实时监控 / 凭据管理 */}
+            {/* Main view switch: Monitor / Credentials */}
             <div className="flex items-center rounded-md border bg-muted/40 p-0.5">
               {MAIN_TABS.map((t) => {
                 const active = mainTab === t.value
@@ -676,7 +741,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* 负载均衡模式分段选择器 */}
+            {/* Load balancing mode segmented control */}
             <div className="hidden items-center rounded-md border bg-muted/40 p-0.5 sm:flex">
               {loadBalancingModes.map((m) => {
                 const active = loadBalancingData?.mode === m.value
@@ -701,7 +766,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
             {DESKTOP && appVersion && (
               <span
                 className="hidden text-xs tabular-nums text-muted-foreground sm:inline"
-                title={`当前版本 ${appVersion}`}
+                title={`Current version ${appVersion}`}
               >
                 v{appVersion}
               </span>
@@ -714,8 +779,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 disabled={checkingUpdate}
                 title={
                   updateInfo?.hasUpdate
-                    ? `有新版本 ${updateInfo.latestVersion}，点击下载`
-                    : '检查更新'
+                    ? `New version ${updateInfo.latestVersion} available, click to download`
+                    : 'Check for updates'
                 }
               >
                 <DownloadCloud
@@ -728,34 +793,34 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <Button
               variant="ghost"
               size="icon"
-              title="GitHub 仓库"
+              title="GitHub Repository"
               onClick={() => {
                 openUrl('https://github.com/ykn1002/kiro.rs').catch((e) =>
-                  toast.error(`打开失败: ${extractErrorMessage(e)}`)
+                  toast.error(`Failed to open: ${extractErrorMessage(e)}`)
                 )
               }}
             >
               <Github className="h-5 w-5" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => setSettingsDialogOpen(true)} title="系统设置">
+            <Button variant="ghost" size="icon" onClick={() => setSettingsDialogOpen(true)} title="Settings">
               <Settings className="h-5 w-5" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={toggleDarkMode} title={darkMode ? '切换到亮色' : '切换到暗色'}>
+            <Button variant="ghost" size="icon" onClick={toggleDarkMode} title={darkMode ? 'Switch to light' : 'Switch to dark'}>
               {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleRefresh} title="刷新凭据列表">
+            <Button variant="ghost" size="icon" onClick={handleRefresh} title="Refresh credentials">
               <RefreshCw className="h-5 w-5" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleLogout} title="退出登录">
+            <Button variant="ghost" size="icon" onClick={handleLogout} title="Logout">
               <LogOut className="h-5 w-5" />
             </Button>
           </div>
         </div>
       </header>
 
-      {/* 主内容 */}
+      {/* Main content */}
       <main className="container mx-auto px-4 md:px-8 py-6 space-y-6">
-        {/* 实时监控 */}
+        {/* Monitor */}
         {mainTab === 'monitor' && (
           <div className="space-y-3">
             <MonitorPanel />
@@ -763,18 +828,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </div>
         )}
 
-        {/* 运行日志（仅桌面版） */}
+        {/* Logs (desktop only) */}
         {DESKTOP && mainTab === 'logs' && <LogPanel />}
 
-        {/* 凭据列表 */}
+        {/* Credentials list */}
         <div className={`space-y-4 ${mainTab === 'credentials' ? '' : 'hidden'}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               {selectedIds.size > 0 && (
                 <div className="flex items-center gap-2">
-                  <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
+                  <Badge variant="secondary">Selected {selectedIds.size}</Badge>
                   <Button onClick={deselectAll} size="sm" variant="ghost">
-                    取消选择
+                    Deselect
                   </Button>
                 </div>
               )}
@@ -784,7 +849,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 <>
                   <Button onClick={handleBatchVerify} size="sm" variant="outline">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
-                    批量验活
+                    Batch Verify
                   </Button>
                   <Button
                     onClick={handleBatchForceRefresh}
@@ -793,28 +858,28 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     disabled={batchRefreshing}
                   >
                     <RefreshCw className={`h-4 w-4 mr-2 ${batchRefreshing ? 'animate-spin' : ''}`} />
-                    {batchRefreshing ? `刷新中... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
+                    {batchRefreshing ? `Refreshing... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : 'Batch Refresh Tokens'}
                   </Button>
                   <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
                     <RotateCcw className="h-4 w-4 mr-2" />
-                    恢复异常
+                    Reset Failures
                   </Button>
                   <Button
                     onClick={handleBatchDelete}
                     size="sm"
                     variant="destructive"
                     disabled={selectedDisabledCount === 0}
-                    title={selectedDisabledCount === 0 ? '只能删除已禁用凭据' : undefined}
+                    title={selectedDisabledCount === 0 ? 'Only disabled credentials can be deleted' : undefined}
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    批量删除
+                    Batch Delete
                   </Button>
                 </>
               )}
               {verifying && !verifyDialogOpen && (
                 <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary">
                   <CheckCircle2 className="h-4 w-4 mr-2 animate-spin" />
-                  验活中... {verifyProgress.current}/{verifyProgress.total}
+                  Verifying... {verifyProgress.current}/{verifyProgress.total}
                 </Button>
               )}
               {data?.credentials && data.credentials.length > 0 && (
@@ -825,7 +890,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   disabled={queryingInfo}
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${queryingInfo ? 'animate-spin' : ''}`} />
-                  {queryingInfo ? `查询中... ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询信息'}
+                  {queryingInfo ? `Querying... ${queryInfoProgress.current}/${queryInfoProgress.total}` : 'Query Info'}
                 </Button>
               )}
               {data?.credentials && data.credentials.length > 0 && (
@@ -835,34 +900,49 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   variant="outline"
                   className="text-destructive hover:text-destructive"
                   disabled={disabledCredentialCount === 0}
-                  title={disabledCredentialCount === 0 ? '没有可清除的已禁用凭据' : undefined}
+                  title={disabledCredentialCount === 0 ? 'No disabled credentials to clear' : undefined}
                 >
                   <Trash2 className="h-4 w-4 mr-2" />
-                  清除已禁用
+                  Clear Disabled
                 </Button>
               )}
               <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
                 <FileUp className="h-4 w-4 mr-2" />
-                Kiro Account Manager 导入
+                Kiro Account Manager Import
               </Button>
               <Button onClick={() => setAwsSsoImportDialogOpen(true)} size="sm" variant="outline">
                 <FileUp className="h-4 w-4 mr-2" />
-                AWS SSO 导入
+                AWS SSO Import
               </Button>
               <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
                 <Upload className="h-4 w-4 mr-2" />
-                批量导入
+                Batch Import
               </Button>
+              <Button onClick={handleExport} size="sm" variant="outline" title="Download all credentials as a JSON backup (includes secrets)">
+                <FileDown className="h-4 w-4 mr-2" />
+                Export
+              </Button>
+              <Button onClick={() => fileInputRef.current?.click()} size="sm" variant="outline" disabled={importingFile} title="Restore credentials from a JSON backup file">
+                <FileUp className="h-4 w-4 mr-2" />
+                {importingFile ? 'Importing...' : 'Import File'}
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={handleImportFileChange}
+              />
               <Button onClick={() => setAddDialogOpen(true)} size="sm">
                 <Plus className="h-4 w-4 mr-2" />
-                添加凭据
+                Add Credential
               </Button>
             </div>
           </div>
           {data?.credentials.length === 0 ? (
             <Card>
               <CardContent className="py-8 text-center text-muted-foreground">
-                暂无凭据
+                No credentials
               </CardContent>
             </Card>
           ) : (
@@ -881,7 +961,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 ))}
               </div>
 
-              {/* 分页控件 */}
+              {/* Pagination */}
               {totalPages > 1 && (
                 <div className="flex justify-center items-center gap-4 mt-6">
                   <Button
@@ -890,10 +970,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                     disabled={currentPage === 1}
                   >
-                    上一页
+                    Previous
                   </Button>
                   <span className="text-sm text-muted-foreground">
-                    第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
+                    Page {currentPage} / {totalPages} ({data?.credentials.length} credentials)
                   </span>
                   <Button
                     variant="outline"
@@ -901,7 +981,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                     disabled={currentPage === totalPages}
                   >
-                    下一页
+                    Next
                   </Button>
                 </div>
               )}
@@ -910,44 +990,44 @@ export function Dashboard({ onLogout }: DashboardProps) {
         </div>
       </main>
 
-      {/* 余额对话框 */}
+      {/* Balance dialog */}
       <BalanceDialog
         credentialId={selectedCredentialId}
         open={balanceDialogOpen}
         onOpenChange={setBalanceDialogOpen}
       />
 
-      {/* 添加凭据对话框 */}
+      {/* Add credential dialog */}
       <AddCredentialDialog
         open={addDialogOpen}
         onOpenChange={setAddDialogOpen}
       />
 
-      {/* 批量导入对话框 */}
+      {/* Batch import dialog */}
       <BatchImportDialog
         open={batchImportDialogOpen}
         onOpenChange={setBatchImportDialogOpen}
       />
 
-      {/* KAM 账号导入对话框 */}
+      {/* KAM account import dialog */}
       <KamImportDialog
         open={kamImportDialogOpen}
         onOpenChange={setKamImportDialogOpen}
       />
 
-      {/* AWS SSO 导入对话框 */}
+      {/* AWS SSO import dialog */}
       <AwsSsoImportDialog
         open={awsSsoImportDialogOpen}
         onOpenChange={setAwsSsoImportDialogOpen}
       />
 
-      {/* 系统设置对话框 */}
+      {/* Settings dialog */}
       <SettingsDialog
         open={settingsDialogOpen}
         onOpenChange={setSettingsDialogOpen}
       />
 
-      {/* 批量验活对话框 */}
+      {/* Batch verify dialog */}
       <BatchVerifyDialog
         open={verifyDialogOpen}
         onOpenChange={setVerifyDialogOpen}

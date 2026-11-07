@@ -15,13 +15,184 @@ use crate::kiro::token_manager::MultiTokenManager;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AppConfigResponse, BalanceResponse,
-    CredentialStatusItem, CredentialsStatusResponse, DimBucketDto, LoadBalancingModeResponse,
-    MetricsResponse, ModelStat, SetLoadBalancingModeRequest, TimeBucketDto, TimeseriesResponse,
-    UpdateAppConfigRequest,
+    CredentialStatusItem, CredentialsExportResponse, CredentialsStatusResponse, DimBucketDto,
+    ExportedAccount, ExportedCredentials, ImportCredentialsResponse, ImportFailedItem,
+    LoadBalancingModeResponse, MetricsResponse, ModelStat, SetLoadBalancingModeRequest,
+    TimeBucketDto, TimeseriesResponse, UpdateAppConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
+
+/// Whether an add/import error means "already exists" (count as duplicate).
+fn is_duplicate_error(msg: &str) -> bool {
+    msg.contains("已存在") || msg.contains("already exists") || msg.contains("duplicate")
+}
+
+/// Treat blank optional fields from KAM/flat JSON as absent.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|text| !text.trim().is_empty())
+}
+
+/// RFC3339 → 毫秒时间戳；无法解析时按 KAM 约定输出 0。
+fn expires_at_millis(raw: Option<&str>) -> i64 {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return 0;
+    };
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return dt.timestamp_millis();
+    }
+    // 兼容旧备份里把时间戳存成字符串的写法。
+    value
+        .parse::<i64>()
+        .map(|raw| if raw > 10_000_000_000 { raw } else { raw * 1000 })
+        .unwrap_or(0)
+}
+
+fn infer_idp(cred: &KiroCredentials) -> String {
+    cred.provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if cred.is_idc() {
+                "BuilderId".to_string()
+            } else if cred.kiro_api_key.is_some()
+                || cred
+                    .auth_method
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("api_key"))
+            {
+                "ApiKey".to_string()
+            } else if cred
+                .auth_method
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("external_idp"))
+            {
+                "ExternalIdP".to_string()
+            } else {
+                "Social".to_string()
+            }
+        })
+}
+
+/// `KiroCredentials` → KAM / ZyphrZero 兼容的账号条目。
+fn credential_to_export_account(cred: KiroCredentials, exported_at: i64) -> ExportedAccount {
+    let id = cred
+        .id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let email = cred
+        .email
+        .clone()
+        .or_else(|| cred.name.clone())
+        .unwrap_or_else(|| format!("credential-{id}"));
+    let nickname = cred.name.clone();
+    let idp = infer_idp(&cred);
+    let status = if cred.disabled { "disabled" } else { "active" }.to_string();
+    let subscription = serde_json::json!({
+        "type": cred.subscription_title.clone().unwrap_or_else(|| "Free".to_string()),
+        "title": cred.subscription_title.clone(),
+    });
+    let expires_at = expires_at_millis(cred.expires_at.as_deref());
+    let region = cred.auth_region.clone().or_else(|| cred.region.clone());
+    let credentials = ExportedCredentials {
+        access_token: cred.access_token.clone().unwrap_or_default(),
+        csrf_token: String::new(),
+        refresh_token: cred.refresh_token.clone(),
+        client_id: cred.client_id.clone(),
+        client_secret: cred.client_secret.clone(),
+        region,
+        auth_region: cred.auth_region.clone(),
+        api_region: cred.api_region.clone(),
+        start_url: cred.start_url.clone(),
+        token_endpoint: cred.token_endpoint.clone(),
+        issuer_url: cred.issuer_url.clone(),
+        scopes: cred.scopes.clone(),
+        expires_at,
+        auth_method: cred.auth_method.clone(),
+        provider: cred.provider.clone(),
+        profile_arn: cred.profile_arn.clone(),
+        priority: Some(cred.priority),
+        disabled: cred.disabled.then_some(true),
+        kiro_api_key: cred.kiro_api_key.clone(),
+        endpoint: cred.endpoint.clone(),
+        kind: cred.kind.clone(),
+        base_url: cred.base_url.clone(),
+        upstream_api_key: cred.upstream_api_key.clone(),
+        proxy_url: cred.proxy_url.clone(),
+        proxy_username: cred.proxy_username.clone(),
+        proxy_password: cred.proxy_password.clone(),
+        subscription_title: cred.subscription_title.clone(),
+    };
+
+    ExportedAccount {
+        id,
+        email,
+        nickname,
+        idp,
+        user_id: None,
+        machine_id: cred.machine_id.clone(),
+        profile_arn: cred.profile_arn.clone(),
+        credentials,
+        subscription,
+        usage: serde_json::json!({}),
+        tags: Vec::new(),
+        status,
+        created_at: exported_at,
+        last_used_at: 0,
+    }
+}
+
+/// 把 KAM 的 `{ email, nickname, machineId, credentials: {...} }` 账号条目
+/// 展开成本仓库导入器需要的扁平凭据对象。
+fn normalize_import_item(item: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut account) = item else {
+        return item;
+    };
+
+    let Some(serde_json::Value::Object(nested)) = account.remove("credentials") else {
+        return serde_json::Value::Object(account);
+    };
+
+    let mut merged = nested;
+    // Account-level metadata（email / machineId / profileArn / nickname ...）
+    // 覆盖 credentials 内的同名字段。
+    for (key, value) in account {
+        merged.insert(key, value);
+    }
+
+    let nickname = merged
+        .get("nickname")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|nickname| !nickname.is_empty())
+        .map(str::to_string);
+    if !merged.contains_key("name")
+        && let Some(nickname) = nickname
+    {
+        merged.insert("name".to_string(), serde_json::Value::String(nickname));
+    }
+
+    // KAM 把 token 刷新区域放在 credentials.region；本仓库对应 authRegion。
+    if !merged.contains_key("authRegion")
+        && let Some(region) = merged.get("region").cloned()
+    {
+        merged.insert("authRegion".to_string(), region);
+    }
+
+    if !merged.contains_key("disabled")
+        && merged
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("disabled"))
+    {
+        merged.insert("disabled".to_string(), serde_json::Value::Bool(true));
+    }
+
+    serde_json::Value::Object(merged)
+}
 
 /// 时间序列分布点 → DTO
 fn dim_to_dto(d: crate::stats_db::DimPoint) -> DimBucketDto {
@@ -433,13 +604,18 @@ impl AdminService {
         let mut new_cred = KiroCredentials {
             id: None,
             name: req.name,
-            access_token: None,
+            access_token: non_empty(req.access_token),
             refresh_token: req.refresh_token,
-            profile_arn: None,
-            expires_at: None,
+            profile_arn: non_empty(req.profile_arn),
+            expires_at: req.expires_at,
             auth_method: Some(req.auth_method),
-            client_id: req.client_id,
-            client_secret: req.client_secret,
+            client_id: non_empty(req.client_id),
+            client_secret: non_empty(req.client_secret),
+            provider: non_empty(req.provider),
+            start_url: non_empty(req.start_url),
+            token_endpoint: non_empty(req.token_endpoint),
+            issuer_url: non_empty(req.issuer_url),
+            scopes: non_empty(req.scopes),
             priority: req.priority,
             region: req.region,
             auth_region: req.auth_region,
@@ -450,7 +626,7 @@ impl AdminService {
             proxy_url: req.proxy_url,
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,
-            disabled: false, // 新添加的凭据默认启用
+            disabled: req.disabled, // 默认 false；备份恢复时保留原状态
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
             kind: req.kind,
@@ -534,6 +710,163 @@ impl AdminService {
         Ok(())
     }
 
+    /// 导出全部凭据（含 secrets，用于备份/迁移）
+    ///
+    /// 默认输出 KAM / ZyphrZero 兼容的 envelope：
+    /// `{ version, exportedAt, accounts: [{ credentials: {...} }] }`。
+    /// 完整的扁平数组格式仍可通过 `?format=flat` 获取，并可直接喂回
+    /// `POST /credentials/import` 恢复。调用方须持有 Admin 权限；
+    /// 前端下载前会提示用户妥善保管（含 refreshToken / api keys 明文）。
+    pub fn export_credentials(&self) -> CredentialsExportResponse {
+        let exported_at = Utc::now().timestamp_millis();
+        let accounts = self
+            .export_credentials_flat()
+            .into_iter()
+            .map(|cred| credential_to_export_account(cred, exported_at))
+            .collect();
+
+        CredentialsExportResponse {
+            // KAM / ZyphrZero 当前使用的导出结构版本（导入端不校验该值）。
+            version: "1.8.3".to_string(),
+            exported_at,
+            accounts,
+            groups: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// 旧的扁平数组导出格式（`credentials.json` 兼容）。
+    pub fn export_credentials_flat(&self) -> Vec<KiroCredentials> {
+        let mut creds = self.token_manager.get_all_credentials();
+        creds.sort_by_key(|c| c.id.unwrap_or(u64::MAX));
+        creds
+    }
+
+    /// 批量导入凭据（备份恢复/迁移）
+    ///
+    /// 每条按 `AddCredentialRequest` 解析（未知字段忽略），复用
+    /// `add_credential`（自带去重、校验、订阅探测与持久化）。
+    /// Dedupe is pre-checked here (plaintext compare of refreshToken /
+    /// kiroApiKey / upstreamApiKey); `add_credential` re-checks by hash, so
+    /// racetime duplicates are still counted as duplicates, not failures.
+    pub async fn import_credentials(
+        &self,
+        items: Vec<serde_json::Value>,
+    ) -> ImportCredentialsResponse {
+        // Snapshot plaintext secrets for pre-check dedupe. Refreshed on each
+        // successful add so duplicates *within* the same batch are also caught.
+        let mut known_refresh: Vec<String> = Vec::new();
+        let mut known_api_keys: Vec<String> = Vec::new();
+        let mut known_upstream_keys: Vec<String> = Vec::new();
+        for c in self.token_manager.get_all_credentials() {
+            if let Some(t) = c.refresh_token.as_deref().map(str::trim)
+                && !t.is_empty()
+            {
+                known_refresh.push(t.to_string());
+            }
+            if let Some(k) = c.kiro_api_key.as_deref().map(str::trim)
+                && !k.is_empty()
+            {
+                known_api_keys.push(k.to_string());
+            }
+            if let Some(k) = c.upstream_api_key.as_deref().map(str::trim)
+                && !k.is_empty()
+            {
+                known_upstream_keys.push(k.to_string());
+            }
+        }
+
+        let mut added = 0usize;
+        let mut duplicates = 0usize;
+        let mut failed = Vec::new();
+        let mut credential_ids = Vec::new();
+
+        for (index, item) in items.into_iter().enumerate() {
+            let item = normalize_import_item(item);
+            let req: AddCredentialRequest = match serde_json::from_value(item) {
+                Ok(r) => r,
+                Err(e) => {
+                    failed.push(ImportFailedItem {
+                        index,
+                        error: format!("Invalid credential object: {}", e),
+                    });
+                    continue;
+                }
+            };
+
+            // Pre-check dedupe (plaintext compare; add_credential re-checks by hash).
+            let is_dupe = if req
+                .kind
+                .as_deref()
+                .is_some_and(|k| k.eq_ignore_ascii_case("anthropic") || k.eq_ignore_ascii_case("openai"))
+            {
+                req.upstream_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|k| !k.is_empty() && known_upstream_keys.iter().any(|x| x == k))
+            } else if req
+                .kiro_api_key
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|k| !k.is_empty())
+                || req.auth_method.eq_ignore_ascii_case("api_key")
+            {
+                req.kiro_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|k| !k.is_empty() && known_api_keys.iter().any(|x| x == k))
+            } else {
+                req.refresh_token
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|t| !t.is_empty() && known_refresh.iter().any(|x| x == t))
+            };
+            if is_dupe {
+                duplicates += 1;
+                continue;
+            }
+
+            match self.add_credential(req.clone()).await {
+                Ok(resp) => {
+                    added += 1;
+                    credential_ids.push(resp.credential_id);
+                    // Track newly added secrets for in-batch dedupe.
+                    if let Some(t) = req.refresh_token.as_deref().map(str::trim)
+                        && !t.is_empty()
+                    {
+                        known_refresh.push(t.to_string());
+                    }
+                    if let Some(k) = req.kiro_api_key.as_deref().map(str::trim)
+                        && !k.is_empty()
+                    {
+                        known_api_keys.push(k.to_string());
+                    }
+                    if let Some(k) = req.upstream_api_key.as_deref().map(str::trim)
+                        && !k.is_empty()
+                    {
+                        known_upstream_keys.push(k.to_string());
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if is_duplicate_error(&msg) {
+                        duplicates += 1;
+                    } else {
+                        failed.push(ImportFailedItem { index, error: msg });
+                    }
+                }
+            }
+        }
+
+        ImportCredentialsResponse {
+            success: failed.is_empty(),
+            added,
+            duplicates,
+            failed,
+            credential_ids,
+        }
+    }
+
     /// 获取负载均衡模式
     pub fn get_load_balancing_mode(&self) -> LoadBalancingModeResponse {
         LoadBalancingModeResponse {
@@ -591,6 +924,7 @@ impl AdminService {
             model_aliases: config.model_aliases.clone(),
             chunked_write_policy: config.chunked_write_policy.clone(),
             codex_truncation_correction: config.codex_truncation_correction,
+            quota_reset_recovery_enabled: config.quota_reset_recovery_enabled,
             proxy_url: config.proxy_url.clone(),
             proxy_username: config.proxy_username.clone(),
             proxy_password_set: config
@@ -761,6 +1095,9 @@ impl AdminService {
         }
         if let Some(enabled) = req.codex_truncation_correction {
             new_config.codex_truncation_correction = enabled;
+        }
+        if let Some(enabled) = req.quota_reset_recovery_enabled {
+            new_config.quota_reset_recovery_enabled = enabled;
         }
         // 全局代理：URL/用户名空串清除、缺省不改；密码空串清除、缺省保留原值。
         // 注意：provider 的 client 按代理缓存且构造时固定，改代理需重启进程才生效。
@@ -959,5 +1296,231 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+
+    /// 获取可用模型列表（从所有 credentials 实时获取）
+    pub async fn get_available_models(&self) -> super::types::AvailableModelsResponse {
+        use std::collections::HashSet;
+        use crate::kiro::list_models::fetch_kiro_models;
+
+        let mut all_model_ids = HashSet::new();
+        let config = self.token_manager.config();
+        let entries = self.token_manager.get_credentials_entries();
+
+        tracing::info!("Fetching models from {} credentials", entries.len());
+
+        let mut fetched_any = false;
+
+        // 过滤出非透传凭据（透传凭据不走 Kiro API）
+        let mut candidates: Vec<_> = entries
+            .into_iter()
+            .filter(|(_, cred, _)| !cred.is_passthrough())
+            .collect();
+        // 优先使用未禁用的凭据
+        candidates.sort_by_key(|(_, _, disabled)| *disabled);
+
+        let global_proxy = self.token_manager.proxy();
+
+        for (id, cred, disabled) in candidates {
+            tracing::info!("Attempting to fetch models via credential #{} (disabled={})", id, disabled);
+
+            // 确保 Token 有效（若过期则自动刷新；IdC 缺失 profileArn 会自动探测持久化）
+            let ctx = match self.token_manager.try_ensure_token(id, &cred).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::warn!("Failed to ensure token for credential #{}: {}", id, e);
+                    continue;
+                }
+            };
+
+            let primary_region = ctx.credentials.effective_api_region(&config);
+            let fallback_region = if primary_region.starts_with("eu-") {
+                "us-east-1"
+            } else {
+                "eu-central-1"
+            };
+
+            let effective_proxy = ctx.credentials.effective_proxy(global_proxy.as_ref());
+
+            let mut success_for_this = false;
+            for region in [primary_region, fallback_region] {
+                match fetch_kiro_models(&ctx.credentials, &ctx.token, Some(region), &config, effective_proxy.as_ref()).await {
+                    Ok(models) => {
+                        tracing::info!("Credential #{} returned {} models in region {}", id, models.len(), region);
+                        for model in models {
+                            all_model_ids.insert(model.model_id);
+                        }
+                        fetched_any = true;
+                        success_for_this = true;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to fetch models from credential #{} in region {}: {}", id, region, e);
+                    }
+                }
+            }
+
+            // 如果已有活跃凭据成功拉取到模型，且数量足够，则无需继续拉取其余凭据以节省时间
+            if success_for_this && !disabled && all_model_ids.len() >= 5 {
+                break;
+            }
+        }
+
+        // 如果没有成功获取任何模型，fallback 到 config 中的模型
+        let mut anthropic_models: Vec<String> = if fetched_any {
+            all_model_ids.into_iter().collect()
+        } else {
+            tracing::info!("No models fetched from credentials, falling back to config models");
+            let models = config.effective_models();
+            models.iter().map(|m| m.kiro_id.clone()).collect()
+        };
+
+        anthropic_models.sort();
+        anthropic_models.dedup();
+
+        tracing::info!("Total unique models: {}", anthropic_models.len());
+
+        // OpenAI models 从 config 获取
+        let mut openai_models: Vec<String> = config
+            .model_aliases
+            .keys()
+            .map(|k| k.clone())
+            .collect();
+        openai_models.sort();
+        openai_models.dedup();
+
+        super::types::AvailableModelsResponse {
+            anthropic_models,
+            openai_models,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_service() -> AdminService {
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                crate::model::config::Config::default(),
+                vec![],
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        AdminService::new(
+            manager,
+            ["ide".to_string()],
+            Arc::new(parking_lot::RwLock::new(String::new())),
+            Arc::new(parking_lot::RwLock::new(String::new())),
+        )
+    }
+
+    #[test]
+    fn export_empty_pool_returns_empty_kam_envelope() {
+        let svc = test_service();
+        let exported = svc.export_credentials();
+        assert_eq!(exported.version, "1.8.3");
+        assert!(exported.accounts.is_empty());
+        assert!(exported.groups.is_empty());
+        assert!(exported.tags.is_empty());
+        assert!(svc.export_credentials_flat().is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_counts_invalid_and_duplicates() {
+        let svc = test_service();
+        // One valid API-key credential (no network needed), one invalid
+        // (unparsable as AddCredentialRequest is impossible via JSON type
+        // mismatch — use an empty object, missing kiroApiKey), then re-import
+        // the same valid one to hit the duplicate path.
+        let valid = serde_json::json!({"authMethod": "api_key", "kiroApiKey": "ksk_test_import_123"});
+        let invalid = serde_json::json!({});
+
+        let first = svc
+            .import_credentials(vec![valid.clone(), invalid])
+            .await;
+        assert_eq!(first.added, 1);
+        assert_eq!(first.failed.len(), 1);
+        assert_eq!(first.failed[0].index, 1);
+        assert_eq!(first.credential_ids.len(), 1);
+
+        let second = svc.import_credentials(vec![valid]).await;
+        assert_eq!(second.added, 0);
+        assert_eq!(second.duplicates, 1);
+        assert!(second.failed.is_empty());
+
+        // Export round-trips the imported credential in KAM envelope form.
+        let exported = svc.export_credentials();
+        assert_eq!(exported.version, "1.8.3");
+        assert_eq!(exported.accounts.len(), 1);
+        assert_eq!(
+            exported.accounts[0].credentials.kiro_api_key.as_deref(),
+            Some("ksk_test_import_123")
+        );
+    }
+
+    #[test]
+    fn kam_export_account_contains_target_fields() {
+        let cred = KiroCredentials {
+            id: Some(7),
+            email: Some("user@example.com".to_string()),
+            refresh_token: Some("refresh-token".to_string()),
+            access_token: Some("access-token".to_string()),
+            client_id: Some("client-id".to_string()),
+            client_secret: Some("client-secret".to_string()),
+            auth_method: Some("idc".to_string()),
+            provider: Some("BuilderId".to_string()),
+            expires_at: Some("2030-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let account = credential_to_export_account(cred, 1_700_000_000_000);
+        let json = serde_json::to_value(&account).unwrap();
+
+        assert_eq!(json["id"], "7");
+        assert_eq!(json["email"], "user@example.com");
+        assert_eq!(json["idp"], "BuilderId");
+        assert_eq!(json["status"], "active");
+        assert_eq!(json["credentials"]["refreshToken"], "refresh-token");
+        assert_eq!(json["credentials"]["accessToken"], "access-token");
+        assert_eq!(json["credentials"]["provider"], "BuilderId");
+        assert_eq!(json["credentials"]["expiresAt"], 1_893_456_000_000i64);
+    }
+
+    #[tokio::test]
+    async fn import_accepts_kam_nested_credentials_and_export_round_trips() {
+        let svc = test_service();
+        let account = serde_json::json!({
+            "email": "nested@example.com",
+            "nickname": "Nested Account",
+            "machineId": "machine-1",
+            "credentials": {
+                "authMethod": "api_key",
+                "kiroApiKey": "ksk_nested_import_123",
+                "region": "us-east-1"
+            }
+        });
+
+        let imported = svc.import_credentials(vec![account]).await;
+        assert_eq!(imported.added, 1);
+        assert!(imported.failed.is_empty());
+
+        let exported = svc.export_credentials();
+        let parsed = serde_json::to_value(&exported).unwrap();
+        assert_eq!(parsed["version"], "1.8.3");
+        assert!(parsed["exportedAt"].as_i64().is_some_and(|ts| ts > 0));
+        assert_eq!(parsed["accounts"][0]["email"], "nested@example.com");
+        assert_eq!(
+            parsed["accounts"][0]["credentials"]["kiroApiKey"],
+            "ksk_nested_import_123"
+        );
+        assert_eq!(
+            parsed["accounts"][0]["credentials"]["authRegion"],
+            "us-east-1"
+        );
     }
 }

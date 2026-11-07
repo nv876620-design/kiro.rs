@@ -14,14 +14,14 @@ import { Card } from '@/components/ui/card'
 import { useMetrics } from '@/hooks/use-credentials'
 import type { MetricsResponse, ModelStat } from '@/types/api'
 
-// token 大数简写：1234 → 1.2k，1234567 → 1.23M
+// Compact token counts: 1234 → 1.2k, 1234567 → 1.23M
 function formatTokens(n: number): string {
   if (n < 1000) return String(n)
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
   return `${(n / 1_000_000).toFixed(2)}M`
 }
 
-// credits 费用格式化：小数保留 2-3 位，大数简写
+// Credits cost formatting: keep 2-3 decimals for small values, abbreviate large ones
 function formatCredits(n: number): string {
   if (n === 0) return '0'
   if (n < 1) return n.toFixed(3)
@@ -30,7 +30,7 @@ function formatCredits(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}M`
 }
 
-// 累计计数器的字段名（用于计算轮询增量）
+// Cumulative counter field names (used to compute per-poll deltas)
 type CounterKey =
   | 'requestsSuccess'
   | 'requestsError'
@@ -40,16 +40,16 @@ type CounterKey =
   | 'streamDecodeFailures'
 
 function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds} 秒`
+  if (seconds < 60) return `${seconds}s`
   const m = Math.floor(seconds / 60)
-  if (m < 60) return `${m} 分钟`
+  if (m < 60) return `${m}m`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时 ${m % 60} 分`
+  if (h < 24) return `${h}h ${m % 60}m`
   const d = Math.floor(h / 24)
-  return `${d} 天 ${h % 24} 小时`
+  return `${d}d ${h % 24}h`
 }
 
-// 纯 SVG 成功率环形
+// Pure-SVG success rate ring
 function SuccessRing({ rate, total }: { rate: number; total: number }) {
   const size = 92
   const stroke = 7
@@ -95,7 +95,7 @@ function SuccessRing({ rate, total }: { rate: number; total: number }) {
         <span className="text-lg font-bold tabular-nums">
           {total === 0 ? '—' : `${pct.toFixed(0)}%`}
         </span>
-        <span className="text-[10px] text-muted-foreground">成功率</span>
+        <span className="text-[10px] text-muted-foreground">Success rate</span>
       </div>
     </div>
   )
@@ -117,7 +117,7 @@ const toneClass: Record<CounterCardProps['tone'], string> = {
   muted: 'text-muted-foreground',
 }
 
-// 紧凑统计条：一行内 图标+标签+数值；0 值整体弱化，非 0 才用语义色
+// Compact stat row: icon + label + value on one line; zero values are dimmed, only non-zero uses semantic colors
 function CounterCard({ icon: Icon, label, value, delta, tone }: CounterCardProps) {
   const active = value > 0
   return (
@@ -138,7 +138,7 @@ function CounterCard({ icon: Icon, label, value, delta, tone }: CounterCardProps
 
 export function MonitorPanel() {
   const { data, isLoading, error } = useMetrics()
-  // 保存上一次快照，用于计算轮询间的增量
+  // Keep the previous snapshot to compute deltas between polls
   const prevRef = useRef<MetricsResponse | null>(null)
   const [deltas, setDeltas] = useState<Record<CounterKey, number>>({
     requestsSuccess: 0,
@@ -163,7 +163,7 @@ export function MonitorPanel() {
       ]
       const next = {} as Record<CounterKey, number>
       for (const k of keys) {
-        // 进程重启会让计数归零，负增量归 0 做保护
+        // A process restart resets the counters; clamp negative deltas to 0
         next[k] = Math.max(0, data[k] - prev[k])
       }
       setDeltas(next)
@@ -174,7 +174,7 @@ export function MonitorPanel() {
   if (error) {
     return (
       <Card className="p-4 text-sm text-destructive">
-        监控数据加载失败：{(error as Error).message}
+        Failed to load metrics: {(error as Error).message}
       </Card>
     )
   }
@@ -186,35 +186,35 @@ export function MonitorPanel() {
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-4 w-4 text-info" />
-        <h2 className="text-sm font-semibold">实时监控</h2>
+        <h2 className="text-sm font-semibold">Realtime Monitoring</h2>
         {isLoading && !data && (
-          <span className="text-xs text-muted-foreground">加载中...</span>
+          <span className="text-xs text-muted-foreground">Loading...</span>
         )}
-        <span className="ml-auto text-xs text-muted-foreground">每 4 秒刷新</span>
+        <span className="ml-auto text-xs text-muted-foreground">Refreshes every 4s</span>
       </div>
 
       <div className="grid items-stretch gap-3 lg:grid-cols-[minmax(280px,340px)_1fr]">
-        {/* 概览：成功率环 + 关键指标 */}
+        {/* Overview: success rate ring + key metrics */}
         <Card className="flex items-center gap-4 p-4">
           <SuccessRing rate={successRate} total={totalReq} />
           <div className="space-y-2.5">
             <div className="flex items-center gap-2 text-sm">
               <Server className="h-3.5 w-3.5 text-info" />
-              <span className="text-muted-foreground">可用凭据</span>
+              <span className="text-muted-foreground">Available credentials</span>
               <span className="ml-auto font-semibold tabular-nums">
                 {data?.credentialsAvailable ?? '—'} / {data?.credentialsTotal ?? '—'}
               </span>
             </div>
             <div className="flex items-center gap-2 text-sm">
               <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-              <span className="text-muted-foreground">累计成功</span>
+              <span className="text-muted-foreground">Total successes</span>
               <span className="ml-auto font-semibold tabular-nums">
                 {data?.requestsSuccess.toLocaleString() ?? '—'}
               </span>
             </div>
             <div className="flex items-center gap-2 text-sm">
               <Timer className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="text-muted-foreground">运行时长</span>
+              <span className="text-muted-foreground">Uptime</span>
               <span className="ml-auto font-semibold tabular-nums">
                 {data ? formatUptime(data.uptimeSeconds) : '—'}
               </span>
@@ -222,39 +222,39 @@ export function MonitorPanel() {
           </div>
         </Card>
 
-        {/* 细分计数（紧凑条，含轮询增量） */}
+        {/* Breakdown counters (compact rows with per-poll deltas) */}
         <div className="grid grid-cols-1 content-center gap-2 sm:grid-cols-2 xl:grid-cols-3">
           <CounterCard
             icon={XCircle}
-            label="请求失败"
+            label="Failed requests"
             value={data?.requestsError ?? 0}
             delta={deltas.requestsError}
             tone="destructive"
           />
           <CounterCard
             icon={Timer}
-            label="上游 429"
+            label="Upstream 429"
             value={data?.upstreamRateLimited ?? 0}
             delta={deltas.upstreamRateLimited}
             tone="warning"
           />
           <CounterCard
             icon={Unplug}
-            label="断流中断"
+            label="Stream interrupts"
             value={data?.streamInterrupted ?? 0}
             delta={deltas.streamInterrupted}
             tone="destructive"
           />
           <CounterCard
             icon={RotateCw}
-            label="断流重连"
+            label="Stream reconnects"
             value={data?.streamRestarted ?? 0}
             delta={deltas.streamRestarted}
             tone="info"
           />
           <CounterCard
             icon={FileWarning}
-            label="解码失败"
+            label="Decode failures"
             value={data?.streamDecodeFailures ?? 0}
             delta={deltas.streamDecodeFailures}
             tone="muted"
@@ -262,28 +262,28 @@ export function MonitorPanel() {
         </div>
       </div>
 
-      {/* 各模型统计表 */}
+      {/* Per-model stats table */}
       <ModelStatsTable models={data?.models ?? []} />
     </section>
   )
 }
 
-// 各模型累计调用 + token + 实时 RPM 表
+// Cumulative requests + tokens + live RPM table per model
 function ModelStatsTable({ models }: { models: ModelStat[] }) {
   return (
     <Card className="p-4">
       <div className="mb-3 flex items-center gap-2">
         <BarChart3 className="h-4 w-4 text-info" />
-        <h3 className="text-sm font-semibold">模型统计</h3>
-        <span className="ml-auto text-xs text-muted-foreground">今日 / 累计 · 实时 RPM 为近 60 秒</span>
+        <h3 className="text-sm font-semibold">Model Stats</h3>
+        <span className="ml-auto text-xs text-muted-foreground">Today / All-time · live RPM covers the last 60s</span>
       </div>
       {models.length === 0 ? (
-        <div className="py-6 text-center text-sm text-muted-foreground">暂无调用记录</div>
+        <div className="py-6 text-center text-sm text-muted-foreground">No requests recorded yet</div>
       ) : (
-        // 默认显示约 3 行，超过纵向滚动；两级表头 sticky 固定
+        // Shows ~3 rows by default and scrolls vertically beyond that; the two-level header stays sticky
         <div className="max-h-[140px] overflow-y-auto overflow-x-auto">
           <table className="w-full table-fixed text-sm">
-            {/* 显式列宽，保证两级表头与数据列边界一致 */}
+            {/* Explicit column widths keep the two-level header aligned with the data columns */}
             <colgroup>
               <col className="w-[22%]" />
               <col className="w-[10%]" />
@@ -295,25 +295,25 @@ function ModelStatsTable({ models }: { models: ModelStat[] }) {
               <col className="w-[10%]" />
             </colgroup>
             <thead>
-              {/* 分组表头：今日 | 累计 | 实时（sticky 第一行） */}
+              {/* Group header: Today | All-time | Live (sticky first row) */}
               <tr className="text-[11px] text-muted-foreground">
                 <th className="sticky top-0 z-10 bg-card pb-1" />
                 <th className="sticky top-0 z-10 border-l bg-card pb-1 px-3 text-center font-medium" colSpan={3}>
-                  今日
+                  Today
                 </th>
                 <th className="sticky top-0 z-10 border-l bg-card pb-1 px-3 text-center font-medium" colSpan={3}>
-                  累计
+                  All-time
                 </th>
-                <th className="sticky top-0 z-10 border-l bg-card pb-1 pl-3 text-center font-medium">实时</th>
+                <th className="sticky top-0 z-10 border-l bg-card pb-1 pl-3 text-center font-medium">Live</th>
               </tr>
               <tr className="text-xs text-muted-foreground">
-                <th className="sticky top-[22px] z-10 border-b bg-card py-1 pr-3 text-left font-medium">模型</th>
-                <th className="sticky top-[22px] z-10 border-b border-l bg-card py-1 px-3 text-right font-medium">调用</th>
+                <th className="sticky top-[22px] z-10 border-b bg-card py-1 pr-3 text-left font-medium">Model</th>
+                <th className="sticky top-[22px] z-10 border-b border-l bg-card py-1 px-3 text-right font-medium">Requests</th>
                 <th className="sticky top-[22px] z-10 border-b bg-card py-1 px-3 text-right font-medium">token</th>
-                <th className="sticky top-[22px] z-10 border-b bg-card py-1 px-3 text-right font-medium">费用</th>
-                <th className="sticky top-[22px] z-10 border-b border-l bg-card py-1 px-3 text-right font-medium">调用</th>
+                <th className="sticky top-[22px] z-10 border-b bg-card py-1 px-3 text-right font-medium">Cost</th>
+                <th className="sticky top-[22px] z-10 border-b border-l bg-card py-1 px-3 text-right font-medium">Requests</th>
                 <th className="sticky top-[22px] z-10 border-b bg-card py-1 px-3 text-right font-medium">token</th>
-                <th className="sticky top-[22px] z-10 border-b bg-card py-1 px-3 text-right font-medium">费用</th>
+                <th className="sticky top-[22px] z-10 border-b bg-card py-1 px-3 text-right font-medium">Cost</th>
                 <th className="sticky top-[22px] z-10 border-b border-l bg-card py-1 pl-3 text-right font-medium">RPM</th>
               </tr>
             </thead>
@@ -323,7 +323,7 @@ function ModelStatsTable({ models }: { models: ModelStat[] }) {
                   <td className="truncate py-1 pr-3 font-medium" title={m.model}>
                     {m.model}
                   </td>
-                  {/* 今日 */}
+                  {/* Today */}
                   <td className="border-l py-1 px-3 text-right tabular-nums">
                     {m.todayRequests > 0 ? (
                       m.todayRequests.toLocaleString()
@@ -353,7 +353,7 @@ function ModelStatsTable({ models }: { models: ModelStat[] }) {
                       <span className="text-muted-foreground/50">0</span>
                     )}
                   </td>
-                  {/* 累计 */}
+                  {/* All-time */}
                   <td className="border-l py-1 px-3 text-right tabular-nums text-muted-foreground">
                     {m.requests.toLocaleString()}
                   </td>
@@ -371,7 +371,7 @@ function ModelStatsTable({ models }: { models: ModelStat[] }) {
                       <span className="text-muted-foreground/50">0</span>
                     )}
                   </td>
-                  {/* 实时 RPM */}
+                  {/* Live RPM */}
                   <td className="border-l py-1 pl-3 text-right tabular-nums">
                     {m.rpm > 0 ? (
                       <span className="font-medium text-success">{m.rpm}</span>

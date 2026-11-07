@@ -11,6 +11,7 @@ import {
   FileText,
   Fingerprint,
   Boxes,
+  RefreshCw,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -24,8 +25,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { TabNav, type TabItem } from '@/components/ui/tabs'
-import { useAppConfig, useUpdateAppConfig } from '@/hooks/use-credentials'
-import { extractErrorMessage } from '@/lib/utils'
+import { Combobox } from '@/components/ui/combobox'
+import { useAppConfig, useUpdateAppConfig, useAvailableModels } from '@/hooks/use-credentials'
+import { cn, extractErrorMessage } from '@/lib/utils'
 import {
   isDesktop,
   getDesktopSettings,
@@ -39,19 +41,19 @@ import { storage } from '@/lib/storage'
 import { Monitor, FileUp } from 'lucide-react'
 import type { ModelDef } from '@/types/api'
 
-// 设置分组 Tab
+// Settings group tabs
 type SettingsTab = 'general' | 'rpm' | 'write' | 'fingerprint' | 'models' | 'desktop'
 
-// 「桌面」Tab 仅在 Tauri 桌面壳中出现
+// The "Desktop" tab only appears in the Tauri desktop shell
 const DESKTOP = isDesktop()
 
 const SETTINGS_TABS: TabItem[] = [
-  { value: 'general', label: '常规', icon: KeyRound },
-  { value: 'rpm', label: 'RPM 限流', icon: Gauge },
-  { value: 'write', label: '写入与截断', icon: FileText },
-  { value: 'fingerprint', label: '版本指纹', icon: Fingerprint },
-  { value: 'models', label: '模型与别名', icon: Boxes },
-  ...(DESKTOP ? [{ value: 'desktop', label: '桌面', icon: Monitor } as TabItem] : []),
+  { value: 'general', label: 'General', icon: KeyRound },
+  { value: 'rpm', label: 'RPM Limits', icon: Gauge },
+  { value: 'write', label: 'Writes & Truncation', icon: FileText },
+  { value: 'fingerprint', label: 'Version Fingerprint', icon: Fingerprint },
+  { value: 'models', label: 'Models & Aliases', icon: Boxes },
+  ...(DESKTOP ? [{ value: 'desktop', label: 'Desktop', icon: Monitor } as TabItem] : []),
 ]
 
 interface SettingsDialogProps {
@@ -59,7 +61,7 @@ interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-// 可选数字输入：空字符串 → undefined（沿用兜底值）
+// Optional numeric input: an empty string maps to undefined (fall back to the default)
 function parseOptionalRpm(value: string): number | null | undefined {
   const trimmed = value.trim()
   if (trimmed === '') return null
@@ -92,6 +94,11 @@ function rowsToAliases(rows: ModelAliasRow[]): Record<string, string> {
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const { data: config, isLoading, error } = useAppConfig()
   const { mutate: updateConfig, isPending } = useUpdateAppConfig()
+  const {
+    data: availableModels,
+    refetch: refetchAvailableModels,
+    isFetching: isFetchingModels,
+  } = useAvailableModels()
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
   const [apiKey, setApiKey] = useState('')
@@ -115,7 +122,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [chunkedTriggerLines, setChunkedTriggerLines] = useState('150')
   const [chunkedChunkLines, setChunkedChunkLines] = useState('50')
   const [codexTruncationCorrection, setCodexTruncationCorrection] = useState(true)
-  // 桌面壳设置（仅桌面版）
+  const [quotaResetRecoveryEnabled, setQuotaResetRecoveryEnabled] = useState(false)
+  // Desktop shell settings (desktop only)
   const [silentStart, setSilentStart] = useState(false)
   const [autostart, setAutostart] = useState(false)
   const [autoLightweight, setAutoLightweight] = useState(true)
@@ -125,18 +133,18 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [portSaving, setPortSaving] = useState(false)
   const [adminApiKey, setAdminApiKeyState] = useState('')
   const [showAdminKey, setShowAdminKey] = useState(false)
-  // 全局代理（config 级，需重启生效）
+  // Global proxy (config level; requires a restart)
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
-  // 后端仅回传「是否已设置密码」，不回明文；据此显示 placeholder，空提交则不改密码
+  // The backend only reports whether a password is set, never the plaintext; use that for the placeholder and keep the password unchanged when submitted empty
   const [proxyPasswordSet, setProxyPasswordSet] = useState(false)
 
-  // 打开对话框（或拉到数据）时用服务端值回填表单
+  // Fill the form with the server values when the dialog opens (or the data arrives)
   useEffect(() => {
     if (!open || !config) return
     setActiveTab('general')
-    // 打开时默认：模型列表展开、别名折叠
+    // Defaults on open: model list expanded, aliases collapsed
     setModelsExpanded(true)
     setAliasesExpanded(false)
     setApiKey(config.apiKey)
@@ -158,13 +166,14 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     setChunkedTriggerLines(String(config.chunkedWritePolicy?.triggerLines ?? 150))
     setChunkedChunkLines(String(config.chunkedWritePolicy?.chunkLines ?? 50))
     setCodexTruncationCorrection(config.codexTruncationCorrection ?? true)
+    setQuotaResetRecoveryEnabled(config.quotaResetRecoveryEnabled ?? false)
     setProxyUrl(config.proxyUrl ?? '')
     setProxyUsername(config.proxyUsername ?? '')
-    setProxyPassword('') // 明文不回传，留空表示不修改
+    setProxyPassword('') // The plaintext is never returned; leave empty to keep it unchanged
     setProxyPasswordSet(config.proxyPasswordSet ?? false)
   }, [open, config])
 
-  // 桌面设置独立加载（不依赖服务端 config）
+  // Desktop settings load independently of the server config
   useEffect(() => {
     if (!open || !DESKTOP) return
     getDesktopSettings()
@@ -177,7 +186,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         }
       })
       .catch((e) => {
-        toast.error(`读取桌面设置失败: ${extractErrorMessage(e)}`)
+        toast.error(`Failed to read desktop settings: ${extractErrorMessage(e)}`)
       })
     getPortStatus()
       .then((p) => {
@@ -187,11 +196,11 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         }
       })
       .catch((e) => {
-        toast.error(`读取端口状态失败: ${extractErrorMessage(e)}`)
+        toast.error(`Failed to read the port status: ${extractErrorMessage(e)}`)
       })
   }, [open])
 
-  // 桌面开关即时生效（OS 级设置，不随「保存并生效」按钮走）
+  // Desktop toggles apply immediately (OS-level settings, independent of the "Save & Apply" button)
   const applyDesktop = (next: {
     silentStart?: boolean
     autostart?: boolean
@@ -209,45 +218,45 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     setAutoLightweight(merged.autoLightweight)
     setLightweightMinutes(merged.lightweightMinutes)
     setDesktopSettings(merged).catch((e) => {
-      toast.error(`保存桌面设置失败: ${extractErrorMessage(e)}`)
+      toast.error(`Failed to save desktop settings: ${extractErrorMessage(e)}`)
     })
   }
 
-  // 保存端口：前端先校验范围，后端写回前会再探测可用性
+  // Save port: the frontend checks the range first and the backend re-probes availability before writing
   const handleSavePort = async () => {
     const port = parseInt(portInput, 10)
     if (!Number.isFinite(port) || port < 1 || port > 65535) {
-      toast.error('端口需在 1–65535 之间')
+      toast.error('The port must be between 1 and 65535')
       return
     }
     if (portStatus && port === portStatus.configured) {
-      toast.info('端口未变化')
+      toast.info('The port is unchanged')
       return
     }
     setPortSaving(true)
     try {
       await setConfiguredPort(port)
-      toast.success(`端口已改为 ${port}，重启应用后生效`)
+      toast.success(`Port changed to ${port}; restart the app to apply it`)
       const p = await getPortStatus()
       if (p) setPortStatus(p)
     } catch (e) {
-      toast.error(`保存端口失败: ${extractErrorMessage(e)}`)
+      toast.error(`Failed to save the port: ${extractErrorMessage(e)}`)
     } finally {
       setPortSaving(false)
     }
   }
 
   const [importing, setImporting] = useState(false)
-  // 导入完整 config.json（整体覆盖，重启生效）
+  // Import a full config.json (complete overwrite; takes effect after a restart)
   const handleImportConfig = async () => {
     setImporting(true)
     try {
       const res = await importConfig()
       if (res && !res.cancelled) {
-        toast.success(`配置已导入（端口 ${res.port}），重启应用后生效`)
+        toast.success(`Config imported (port ${res.port}); restart the app to apply it`)
       }
     } catch (e) {
-      toast.error(`导入配置失败: ${extractErrorMessage(e)}`)
+      toast.error(`Failed to import the config: ${extractErrorMessage(e)}`)
     } finally {
       setImporting(false)
     }
@@ -294,12 +303,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
     if (!apiKey.trim()) {
       setActiveTab('general')
-      toast.error('apiKey 不能为空')
+      toast.error('apiKey is required')
       return
     }
     if (!adminApiKey.trim()) {
       setActiveTab('general')
-      toast.error('Admin API Key 不能为空')
+      toast.error('Admin API Key is required')
       return
     }
     if (
@@ -309,13 +318,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       !streamingSdkVersion.trim()
     ) {
       setActiveTab('fingerprint')
-      toast.error('版本信息均不能为空')
+      toast.error('All version fields are required')
       return
     }
     if (models.length === 0) {
       setActiveTab('models')
       setModelsExpanded(true)
-      toast.error('至少需要一个模型定义')
+      toast.error('At least one model definition is required')
       return
     }
     for (let i = 0; i < models.length; i++) {
@@ -323,13 +332,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       if (!m.family.trim() || !m.kiroId.trim() || !m.displayId.trim() || !m.displayName.trim()) {
         setActiveTab('models')
         setModelsExpanded(true)
-        toast.error(`第 ${i + 1} 个模型的 family / kiroId / displayId / displayName 均不能为空`)
+        toast.error(`Model #${i + 1}: family / kiroId / displayId / displayName are all required`)
         return
       }
       if (m.maxTokens <= 0 || m.contextWindow <= 0) {
         setActiveTab('models')
         setModelsExpanded(true)
-        toast.error(`第 ${i + 1} 个模型的 maxTokens / contextWindow 必须为正数`)
+        toast.error(`Model #${i + 1}: maxTokens / contextWindow must be positive numbers`)
         return
       }
     }
@@ -341,7 +350,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       if (hasFrom !== hasTo) {
         setActiveTab('models')
         setAliasesExpanded(true)
-        toast.error(`第 ${i + 1} 条模型别名的「客户端名」和「映射目标」需同时填写或同时留空`)
+        toast.error(`Model alias #${i + 1}: the client name and the mapped target must both be filled in or both left empty`)
         return
       }
     }
@@ -350,12 +359,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     const chunkLines = parseInt(chunkedChunkLines, 10) || 0
     if (chunkedEnabled && chunkLines <= 0) {
       setActiveTab('write')
-      toast.error('分块写入的每块行数必须为正数')
+      toast.error('Chunk lines must be a positive number')
       return
     }
     if (chunkedEnabled && triggerLines < chunkLines) {
       setActiveTab('write')
-      toast.error('分块写入的触发行数不能小于每块行数')
+      toast.error('Trigger lines cannot be smaller than chunk lines')
       return
     }
 
@@ -390,25 +399,26 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         modelAliases: rowsToAliases(modelAliases),
         chunkedWritePolicy: {
           enabled: chunkedEnabled,
-          // 关闭时也提交当前值，便于下次开启时保留用户填写的数
+          // Submit the current values even when disabled so a later re-enable keeps them
           triggerLines: triggerLines || 150,
           chunkLines: chunkLines || 50,
         },
         codexTruncationCorrection,
+        quotaResetRecoveryEnabled,
         proxyUrl: proxyUrl.trim(),
         proxyUsername: proxyUsername.trim(),
-        // 密码框留空 = 不修改（字段缺省则后端保留原值）；输入了才提交
+        // An empty password field means "unchanged" (an omitted field makes the backend keep the current value); only submit when filled in
         ...(proxyPassword ? { proxyPassword } : {}),
       },
       {
         onSuccess: () => {
-          // adminApiKey 热生效后，本地存的旧登录 key 会立刻失效；同步更新以免当前会话被登出
+          // Once adminApiKey is hot-applied the locally stored login key becomes invalid at once; update it so the current session is not logged out
           storage.setApiKey(trimmedAdminKey)
-          toast.success('配置已保存并热生效')
+          toast.success('Configuration saved and applied live')
           onOpenChange(false)
         },
         onError: (err: unknown) => {
-          toast.error(`保存失败: ${extractErrorMessage(err)}`)
+          toast.error(`Failed to save: ${extractErrorMessage(err)}`)
         },
       }
     )
@@ -416,40 +426,40 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl h-[85vh] flex flex-col">
+      <DialogContent className="sm:max-w-4xl h-[85vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>系统设置</DialogTitle>
+          <DialogTitle>Settings</DialogTitle>
         </DialogHeader>
 
         {isLoading ? (
-          <div className="flex flex-1 items-center justify-center text-muted-foreground">加载配置中...</div>
+          <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading configuration...</div>
         ) : error ? (
           <div className="flex flex-1 items-center justify-center text-center text-destructive">
-            加载配置失败：{extractErrorMessage(error)}
+            Failed to load the configuration: {extractErrorMessage(error)}
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1">
             <div className="flex min-h-0 flex-1 gap-4 py-4">
-              {/* 左侧 Tab 导航 */}
+              {/* Left tab navigation */}
               <TabNav
                 items={SETTINGS_TABS}
                 value={activeTab}
                 onChange={(v) => setActiveTab(v as SettingsTab)}
-                className="w-36 shrink-0 border-r pr-2"
+                className="w-52 shrink-0 border-r pr-3"
               />
 
-              {/* 右侧内容区（按 Tab 切换） */}
+              {/* Right content area (switched per tab) */}
               <div className="space-y-6 overflow-y-auto flex-1 pr-1">
               {/* API Key */}
               <section className={`space-y-2 ${activeTab === 'general' ? '' : 'hidden'}`}>
-                <h3 className="text-sm font-semibold">客户端 API Key</h3>
+                <h3 className="text-sm font-semibold">Client API Key</h3>
                 <div className="relative">
                   <Input
                     type={showApiKey ? 'text' : 'password'}
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                     disabled={isPending}
-                    placeholder="客户端访问密钥"
+                    placeholder="Client access key"
                     className="pr-10"
                   />
                   <button
@@ -462,17 +472,17 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   </button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  修改后立即对后续客户端请求生效。注意：保存后旧密钥失效，请同步更新调用方
+                  Takes effect for subsequent client requests immediately. Note: the old key stops working after saving, so update your callers accordingly.
                 </p>
 
-                <h3 className="text-sm font-semibold pt-2">Admin API Key（管理密钥）</h3>
+                <h3 className="text-sm font-semibold pt-2">Admin API Key (management key)</h3>
                 <div className="relative">
                   <Input
                     type={showAdminKey ? 'text' : 'password'}
                     value={adminApiKey}
                     onChange={(e) => setAdminApiKeyState(e.target.value)}
                     disabled={isPending}
-                    placeholder="管理面板访问密钥"
+                    placeholder="Admin panel access key"
                     className="pr-10"
                   />
                   <button
@@ -485,23 +495,23 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   </button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  访问本管理面板的密钥，保存后立即热生效。桌面版用它自动登录；当前页面会同步更新，不会被登出。
-                  注意：其它已登录的客户端需用新密钥重新登录。
+                  The key used to access this admin panel; it takes effect immediately after saving. The desktop build uses it to log in automatically, and this page updates in sync without being logged out.
+                  Note: other logged-in clients must sign in again with the new key.
                 </p>
 
-                <h3 className="text-sm font-semibold pt-2">全局代理</h3>
+                <h3 className="text-sm font-semibold pt-2">Global Proxy</h3>
                 <Input
                   value={proxyUrl}
                   onChange={(e) => setProxyUrl(e.target.value)}
                   disabled={isPending}
-                  placeholder="代理 URL，如 http://host:port 或 socks5://host:port（留空不使用）"
+                  placeholder="Proxy URL, e.g. http://host:port or socks5://host:port (leave empty to disable)"
                 />
                 <div className="grid grid-cols-2 gap-3">
                   <Input
                     value={proxyUsername}
                     onChange={(e) => setProxyUsername(e.target.value)}
                     disabled={isPending}
-                    placeholder="代理用户名（可选）"
+                    placeholder="Proxy username (optional)"
                     autoComplete="off"
                   />
                   <Input
@@ -509,23 +519,23 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     value={proxyPassword}
                     onChange={(e) => setProxyPassword(e.target.value)}
                     disabled={isPending}
-                    placeholder={proxyPasswordSet ? '已设置（留空不修改）' : '代理密码（可选）'}
+                    placeholder={proxyPasswordSet ? 'Already set (leave empty to keep it)' : 'Proxy password (optional)'}
                     autoComplete="new-password"
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  所有凭据默认走此代理，凭据可在自身配置里单独覆盖（填 <code>direct</code> 表示不走代理）。
-                  <span className="text-amber-600 dark:text-amber-500">修改后需重启应用才生效</span>
-                  （代理连接在启动时建立并缓存）。
+                  All credentials use this proxy by default; each credential can override it in its own config (set <code>direct</code> to bypass the proxy).{' '}
+                  <span className="text-amber-600 dark:text-amber-500">Requires an app restart to take effect</span>{' '}
+                  (the proxy connection is established and cached at startup).
                 </p>
               </section>
 
-              {/* RPM 限制 */}
+              {/* RPM limits */}
               <section className={`space-y-2 ${activeTab === 'rpm' ? '' : 'hidden'}`}>
-                <h3 className="text-sm font-semibold">凭据 RPM 限制</h3>
+                <h3 className="text-sm font-semibold">Credential RPM Limits</h3>
                 <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                   <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">兜底 (credentialRpm)</label>
+                    <label className="text-xs text-muted-foreground">Fallback (credentialRpm)</label>
                     <Input
                       type="number"
                       min="0"
@@ -539,7 +549,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     <Input
                       type="number"
                       min="0"
-                      placeholder="兜底"
+                      placeholder="Fallback"
                       value={rpmOpus}
                       onChange={(e) => setRpmOpus(e.target.value)}
                       disabled={isPending}
@@ -550,7 +560,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     <Input
                       type="number"
                       min="0"
-                      placeholder="兜底"
+                      placeholder="Fallback"
                       value={rpmSonnet}
                       onChange={(e) => setRpmSonnet(e.target.value)}
                       disabled={isPending}
@@ -561,7 +571,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     <Input
                       type="number"
                       min="0"
-                      placeholder="兜底"
+                      placeholder="Fallback"
                       value={rpmHaiku}
                       onChange={(e) => setRpmHaiku(e.target.value)}
                       disabled={isPending}
@@ -570,7 +580,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 </div>
                 <div className="space-y-1 max-w-xs">
                   <label className="text-xs text-muted-foreground">
-                    RPM 打满等待 (credentialRpmMaxWaitMs, ms)
+                    Wait when RPM is saturated (credentialRpmMaxWaitMs, ms)
                   </label>
                   <Input
                     type="number"
@@ -581,15 +591,15 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  每个凭据每分钟请求数上限。0 或留空表示不单独限制（专用项留空回退到兜底值）。
-                  「RPM 打满等待」：全部凭据达上限时，发出请求前最多等待的毫秒数；0 表示不等待、立即向客户端返回 429
+                  Per-credential request limit per minute. 0 or empty means no separate limit (leaving a per-family field empty falls back to the fallback value).
+                  "Wait when RPM is saturated": the maximum number of milliseconds to wait before sending a request when every credential is at its limit; 0 means do not wait and return 429 to the client immediately.
                 </p>
               </section>
 
-              {/* 分块写入策略 */}
+              {/* Chunked write policy */}
               <section className={`space-y-2 ${activeTab === 'write' ? '' : 'hidden'}`}>
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">Write/Edit 分块写入</h3>
+                  <h3 className="text-sm font-semibold">Write/Edit Chunked Writes</h3>
                   <Switch
                     checked={chunkedEnabled}
                     onCheckedChange={setChunkedEnabled}
@@ -599,7 +609,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 max-w-md">
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">
-                      触发行数 (triggerLines)
+                      Trigger lines (triggerLines)
                     </label>
                     <Input
                       type="number"
@@ -611,7 +621,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">
-                      每块行数 (chunkLines)
+                      Chunk lines (chunkLines)
                     </label>
                     <Input
                       type="number"
@@ -623,22 +633,22 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  向 Write/Edit 工具描述注入「超长内容分块写入」约束，规避模型输出被截断导致
-                  tool_use 参数不完整、整次调用作废。内容超过「触发行数」才分块，每块不超过
-                  「每块行数」（含 Write 首块与后续 Edit 追加）。默认 150 / 50——每块的 50
-                  取自 Kiro IDE 官方 WRITE_LIMIT 常量，触发阈值放宽到 150 让中小文件一次写完。
-                  截断发生时回灌给模型的纠正指令也使用「每块行数」。
+                  Injects a "chunked writes for very long content" constraint into the Write/Edit tool descriptions to avoid truncated model output leaving
+                  incomplete tool_use arguments that void the whole call. Content is chunked only when it exceeds the trigger line count, and every chunk stays within
+                  the chunk line count (including the first Write chunk and later Edit appends). The defaults are 150 / 50 — the 50 per chunk
+                  comes from the official Kiro IDE WRITE_LIMIT constant, while the trigger threshold is relaxed to 150 so small and medium files are written in one go.
+                  The corrective instruction fed back to the model when truncation happens also uses the chunk line count.
                   <span className="text-amber-600 dark:text-amber-500">
                     {' '}
-                    注意：Kiro 按请求次数计费，分块会把一次写入拆成多次工具往返，显著增加配额消耗。
+                    Note: Kiro bills per request, and chunking splits one write into several tool round trips, which significantly increases quota usage.
                   </span>
                 </p>
               </section>
 
-              {/* codex 截断纠正 */}
+              {/* Codex truncation correction */}
               <section className={`space-y-2 ${activeTab === 'write' ? '' : 'hidden'}`}>
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">codex 截断纠正</h3>
+                  <h3 className="text-sm font-semibold">Codex Truncation Correction</h3>
                   <Switch
                     checked={codexTruncationCorrection}
                     onCheckedChange={setCodexTruncationCorrection}
@@ -646,19 +656,36 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  codex（/v1/responses）端工具参数被 max_tokens 截断时（收到开始却无 stop），
-                  追加一段分块纠正文本提示模型分块写，行数取上面的「每块行数」。关闭后仅停用纠正文本，
-                  挂空 item 的封口修复（补 output_item.done、置 status=incomplete）仍无条件生效。
+                  When a codex (/v1/responses) tool argument is truncated by max_tokens (the start arrives with no stop),
+                  a chunking correction text is appended to tell the model to write in chunks, using the chunk line count above. When disabled, only the correction text stops;
+                  the sealing fix for dangling items (adding output_item.done and setting status=incomplete) still applies unconditionally.
                   <span className="text-muted-foreground">
                     {' '}
-                    注意：此开关只作用于 codex 客户端，其对纠正文本的实际响应需自行验证。
+                    Note: this switch only affects the codex client, so verify its actual response to the correction text yourself.
                   </span>
                 </p>
               </section>
 
-              {/* 版本信息 */}
+              {/* Monthly quota auto-recovery */}
+              <section className={`space-y-2 ${activeTab === 'write' ? '' : 'hidden'}`}>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold">Monthly Quota Auto-Recovery</h3>
+                  <Switch
+                    checked={quotaResetRecoveryEnabled}
+                    onCheckedChange={setQuotaResetRecoveryEnabled}
+                    disabled={isPending}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  When enabled, credentials disabled for monthly quota exhaustion are automatically
+                  re-enabled once the quota reset time passes and remaining quota is positive.
+                  Disabled by default. Recovery is checked on balance refresh.
+                </p>
+              </section>
+
+              {/* Version info */}
               <section className={`space-y-2 ${activeTab === 'fingerprint' ? '' : 'hidden'}`}>
-                <h3 className="text-sm font-semibold">版本信息（上游指纹）</h3>
+                <h3 className="text-sm font-semibold">Version Info (upstream fingerprint)</h3>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">kiroVersion</label>
@@ -694,18 +721,18 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     />
                   </div>
                   <div className="space-y-1 md:col-span-2 lg:col-span-4">
-                    <label className="text-xs text-muted-foreground">machineId（全局默认）</label>
+                    <label className="text-xs text-muted-foreground">machineId (global default)</label>
                     <Input
                       value={machineId}
                       onChange={(e) => setMachineId(e.target.value)}
                       disabled={isPending}
-                      placeholder="64 位 hex 或 UUID"
+                      placeholder="64-char hex or UUID"
                     />
                   </div>
                 </div>
               </section>
 
-              {/* OpenAI/Codex 模型映射 */}
+              {/* OpenAI / Codex model mapping */}
               <section className={`space-y-3 ${activeTab === 'models' ? '' : 'hidden'}`}>
                 <button
                   type="button"
@@ -717,43 +744,48 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   ) : (
                     <ChevronRight className="h-4 w-4" />
                   )}
-                  OpenAI / Codex 模型映射
+                  OpenAI / Codex Model Mapping{' '}
                   <span className="ml-1 text-xs font-normal text-muted-foreground">
-                    （{modelAliases.length} 个别名）
+                    ({modelAliases.length} aliases)
                   </span>
                 </button>
                 {aliasesExpanded && (
                   <>
                     <div className="space-y-1">
-                      <label className="text-xs text-muted-foreground">defaultModel（未识别时回退）</label>
-                      <Input
+                      <label className="text-xs text-muted-foreground">defaultModel (fallback when unrecognized)</label>
+                      <Combobox
+                        options={(availableModels?.anthropicModels || []).map((m: string) => ({ value: m, label: m }))}
                         value={defaultModel}
-                        onChange={(e) => setDefaultModel(e.target.value)}
+                        onChange={setDefaultModel}
                         disabled={isPending}
                         placeholder="claude-opus-4-6"
-                        list="model-target-options"
                       />
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Codex 发送 gpt-5.5 等 OpenAI 模型名时，通过别名或 defaultModel 映射到下方模型列表中的 displayId
+                      When Codex sends an OpenAI model name such as gpt-5.5, it is mapped through an alias or defaultModel to a displayId in the model list below
                     </p>
                     <div className="space-y-2">
                       {modelAliases.map((row, index) => (
                         <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
-                          <LabeledInput
-                            label="客户端模型名"
-                            value={row.from}
-                            disabled={isPending}
-                            onChange={(v) => updateAlias(index, { from: v })}
-                            placeholder="gpt-5.5"
-                          />
-                          <LabeledInput
-                            label="映射目标"
-                            value={row.to}
-                            disabled={isPending}
-                            onChange={(v) => updateAlias(index, { to: v })}
-                            placeholder="claude-opus-4-6"
-                          />
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Client model name</label>
+                            <Input
+                              value={row.from}
+                              disabled={isPending}
+                              onChange={(e) => updateAlias(index, { from: e.target.value })}
+                              placeholder="gpt-5.5"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Mapped target</label>
+                            <Combobox
+                              options={(availableModels?.anthropicModels || []).map((m: string) => ({ value: m, label: m }))}
+                              value={row.to}
+                              disabled={isPending}
+                              onChange={(v) => updateAlias(index, { to: v })}
+                              placeholder="claude-opus-4-6"
+                            />
+                          </div>
                           <Button
                             type="button"
                             size="icon"
@@ -776,34 +808,52 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                       disabled={isPending}
                     >
                       <Plus className="h-4 w-4 mr-1" />
-                      添加别名
+                      Add Alias
                     </Button>
-                    <datalist id="model-target-options">
-                      {models.map((m) => (
-                        <option key={m.displayId} value={m.displayId} />
-                      ))}
-                    </datalist>
                   </>
                 )}
               </section>
 
-              {/* 模型列表 */}
+              {/* Model list */}
               <section className={`space-y-3 ${activeTab === 'models' ? '' : 'hidden'}`}>
-                <button
-                  type="button"
-                  onClick={() => setModelsExpanded((v) => !v)}
-                  className="flex items-center gap-1 text-sm font-semibold hover:text-foreground/80"
-                >
-                  {modelsExpanded ? (
-                    <ChevronDown className="h-4 w-4" />
-                  ) : (
-                    <ChevronRight className="h-4 w-4" />
-                  )}
-                  模型列表
-                  <span className="ml-1 text-xs font-normal text-muted-foreground">
-                    （{models.length} 个）
-                  </span>
-                </button>
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setModelsExpanded((v) => !v)}
+                    className="flex items-center gap-1 text-sm font-semibold hover:text-foreground/80"
+                  >
+                    {modelsExpanded ? (
+                      <ChevronDown className="h-4 w-4" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4" />
+                    )}
+                    Model List{' '}
+                    <span className="ml-1 text-xs font-normal text-muted-foreground">
+                      ({models.length})
+                    </span>
+                  </button>
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 text-xs text-muted-foreground hover:text-foreground"
+                    disabled={isFetchingModels}
+                    onClick={async () => {
+                      const res = await refetchAvailableModels()
+                      const count = res.data?.anthropicModels?.length ?? 0
+                      if (count > 0) {
+                        toast.success(`Discovered ${count} models from credentials`)
+                      } else {
+                        toast.info('No models returned from credentials')
+                      }
+                    }}
+                    title="Fetch available models from active credentials"
+                  >
+                    <RefreshCw className={cn('h-3.5 w-3.5 mr-1.5', isFetchingModels && 'animate-spin')} />
+                    {isFetchingModels ? 'Fetching...' : 'Fetch from Credentials'}
+                  </Button>
+                </div>
                 {modelsExpanded && (
                   <>
                     <div className="space-y-3">
@@ -813,13 +863,14 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                           model={m}
                           index={index}
                           disabled={isPending}
+                          availableKiroIds={availableModels?.anthropicModels}
                           onChange={updateModel}
                           onRemove={removeModel}
                         />
                       ))}
                       {models.length === 0 && (
                         <p className="text-sm text-muted-foreground text-center py-4">
-                          暂无模型，点击「添加模型」新增
+                          No models yet. Click "Add Model" to create one.
                         </p>
                       )}
                     </div>
@@ -832,28 +883,27 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                       disabled={isPending}
                     >
                       <Plus className="h-4 w-4 mr-1" />
-                      添加模型
+                      Add Model
                     </Button>
                   </>
                 )}
               </section>
 
-              {/* 桌面版设置（仅 Tauri 壳） */}
+              {/* Desktop settings (Tauri shell only) */}
               {DESKTOP && (
                 <section className={`space-y-4 ${activeTab === 'desktop' ? '' : 'hidden'}`}>
-                  {/* 监听端口 */}
+                  {/* Listen port */}
                   <div className="space-y-2">
-                    <h3 className="text-sm font-semibold">监听端口</h3>
+                    <h3 className="text-sm font-semibold">Listen Port</h3>
                     {portStatus?.conflicted && (
                       <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-                        端口冲突：期望端口 {portStatus.configured} 被占用，当前临时监听在{' '}
-                        <span className="font-mono font-semibold">{portStatus.actual}</span>。
-                        改用其他空闲端口并重启应用即可恢复固定端口。
+                        Port conflict: the desired port {portStatus.configured} is taken, so the app is temporarily listening on{' '}
+                        <span className="font-mono font-semibold">{portStatus.actual}</span>. Pick another free port and restart the app to restore a fixed port.
                       </div>
                     )}
                     <div className="flex items-end gap-2">
                       <div className="space-y-1">
-                        <label className="text-xs text-muted-foreground">期望端口 (1–65535)</label>
+                        <label className="text-xs text-muted-foreground">Desired port (1–65535)</label>
                         <Input
                           type="number"
                           min="1"
@@ -865,20 +915,19 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                         />
                       </div>
                       <Button type="button" onClick={handleSavePort} disabled={portSaving}>
-                        {portSaving ? '保存中...' : '保存端口'}
+                        {portSaving ? 'Saving...' : 'Save Port'}
                       </Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      当前实际监听：
-                      <span className="font-mono">{portStatus?.actual ?? '—'}</span>
-                      {portStatus && !portStatus.conflicted && '（与期望一致）'}
-                      。修改端口需重启应用后生效；保存时会先检测端口是否空闲。
+                      Currently listening on: <span className="font-mono">{portStatus?.actual ?? '—'}</span>
+                      {portStatus && !portStatus.conflicted && ' (matches the desired port)'}
+                      . Changing the port requires an app restart to take effect; the port is checked for availability before saving.
                     </p>
                   </div>
 
-                  {/* 导入配置 */}
+                  {/* Import config */}
                   <div className="space-y-2 border-t pt-4">
-                    <h3 className="text-sm font-semibold">导入配置</h3>
+                    <h3 className="text-sm font-semibold">Import Config</h3>
                     <Button
                       type="button"
                       variant="outline"
@@ -886,24 +935,24 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                       disabled={importing}
                     >
                       <FileUp className="mr-1 h-4 w-4" />
-                      {importing ? '导入中...' : '从文件导入 config.json'}
+                      {importing ? 'Importing...' : 'Import config.json from file'}
                     </Button>
                     <p className="text-xs text-muted-foreground">
-                      选择一个完整的 config.json 整体覆盖当前配置（含 apiKey / adminApiKey / 端口 /
-                      版本指纹 / 模型等全部字段）。导入前会校验格式与必填项，
+                      Imports a complete config.json and overwrites the current configuration (including apiKey / adminApiKey / port /
+                      version fingerprint / models and every other field). The format and required fields are validated before importing;
                       <span className="text-amber-600 dark:text-amber-500">
                         {' '}
-                        导入后需重启应用才生效
+                        the change takes effect after an app restart
                       </span>
-                      。
+                      .
                     </p>
                   </div>
 
                   <div className="flex items-center justify-between">
                     <div>
-                      <h3 className="text-sm font-semibold">开机启动</h3>
+                      <h3 className="text-sm font-semibold">Launch at Login</h3>
                       <p className="text-xs text-muted-foreground">
-                        登录系统后自动启动 kiro-rs
+                        Starts kiro-rs automatically after you sign in to the system
                       </p>
                     </div>
                     <Switch
@@ -913,9 +962,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   </div>
                   <div className="flex items-center justify-between">
                     <div>
-                      <h3 className="text-sm font-semibold">静默启动</h3>
+                      <h3 className="text-sm font-semibold">Silent Start</h3>
                       <p className="text-xs text-muted-foreground">
-                        开机自启时不弹出窗口，仅驻留菜单栏托盘；手动打开始终显示窗口
+                        Does not open a window on autostart and only stays in the menu bar tray; launching it manually always shows the window
                       </p>
                     </div>
                     <Switch
@@ -925,10 +974,10 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   </div>
                   <div className="flex items-center justify-between">
                     <div>
-                      <h3 className="text-sm font-semibold">自动轻量模式</h3>
+                      <h3 className="text-sm font-semibold">Auto Lightweight Mode</h3>
                       <p className="text-xs text-muted-foreground">
-                        关窗一段时间后销毁界面进程释放内存（约降至几十 MB）；
-                        再次唤出时重新加载页面，约 1 秒延迟。关闭则窗口常驻内存、唤出零延迟。
+                        Destroys the UI process after the window has been closed for a while to free memory (down to a few dozen MB);
+                        the page reloads when summoned again, with about a 1-second delay. When disabled, the window stays in memory and is summoned with no delay.
                       </p>
                     </div>
                     <Switch
@@ -939,9 +988,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   {autoLightweight && (
                     <div className="flex items-center justify-between pl-1">
                       <div>
-                        <h3 className="text-sm font-semibold">进入延迟</h3>
+                        <h3 className="text-sm font-semibold">Enter Delay</h3>
                         <p className="text-xs text-muted-foreground">
-                          关窗后多久进入轻量模式（分钟）；0 表示关窗立即释放
+                          How many minutes after closing the window to enter lightweight mode; 0 releases immediately
                         </p>
                       </div>
                       <Input
@@ -959,8 +1008,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     </div>
                   )}
                   <p className="text-xs text-muted-foreground">
-                    以上为本机桌面设置，切换后立即生效，不受下方「保存并生效」影响。
-                    窗口关闭后会隐藏到菜单栏托盘，点击 Dock 图标或托盘图标可重新唤出。
+                    These are local desktop settings; toggles apply immediately and are not affected by the "Save & Apply" button below.
+                    Closing the window hides it into the menu bar tray; click the Dock icon or the tray icon to bring it back.
                   </p>
                 </section>
               )}
@@ -969,10 +1018,10 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>
-                取消
+                Cancel
               </Button>
               <Button type="submit" disabled={isPending}>
-                {isPending ? '保存中...' : '保存并生效'}
+                {isPending ? 'Saving...' : 'Save & Apply'}
               </Button>
             </DialogFooter>
           </form>
@@ -986,16 +1035,17 @@ interface ModelRowProps {
   model: ModelDef
   index: number
   disabled: boolean
+  availableKiroIds?: string[]
   onChange: (index: number, patch: Partial<ModelDef>) => void
   onRemove: (index: number) => void
 }
 
-function ModelRow({ model, index, disabled, onChange, onRemove }: ModelRowProps) {
+function ModelRow({ model, index, disabled, availableKiroIds, onChange, onRemove }: ModelRowProps) {
   return (
     <div className="rounded-md border p-3 space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground">
-          #{index + 1} {model.displayName || model.displayId || '(未命名)'}
+          #{index + 1} {model.displayName || model.displayId || '(unnamed)'}
         </span>
         <Button
           type="button"
@@ -1012,9 +1062,17 @@ function ModelRow({ model, index, disabled, onChange, onRemove }: ModelRowProps)
         <LabeledInput label="family" value={model.family} disabled={disabled}
           onChange={(v) => onChange(index, { family: v })} placeholder="opus / sonnet / haiku" />
         <LabeledInput label="version" value={model.version ?? ''} disabled={disabled}
-          onChange={(v) => onChange(index, { version: v })} placeholder="如 4.8（haiku 可留空）" />
-        <LabeledInput label="kiroId" value={model.kiroId} disabled={disabled}
-          onChange={(v) => onChange(index, { kiroId: v })} placeholder="claude-opus-4.8" />
+          onChange={(v) => onChange(index, { version: v })} placeholder="e.g. 4.8 (may be empty for haiku)" />
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">kiroId</label>
+          <Combobox
+            options={(availableKiroIds || []).map((id) => ({ value: id, label: id }))}
+            value={model.kiroId}
+            onChange={(v) => onChange(index, { kiroId: v })}
+            disabled={disabled}
+            placeholder="claude-opus-4.8"
+          />
+        </div>
         <LabeledInput label="displayId" value={model.displayId} disabled={disabled}
           onChange={(v) => onChange(index, { displayId: v })} placeholder="claude-opus-4-8" />
         <LabeledInput label="displayName" value={model.displayName} disabled={disabled}

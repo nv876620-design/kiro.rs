@@ -65,6 +65,35 @@ fn map_provider_error(err: Error, passthrough_retry_after: bool) -> Response {
     // 402 额度耗尽让客户端感知），其余仍按 502 处理，不向客户端暴露凭据/权限细节。
     if let Some(api_err) = err.downcast_ref::<crate::kiro::provider::UpstreamApiError>() {
         match api_err.status {
+            400 if api_err.message.contains("INVALID_MODEL_ID") => {
+                tracing::warn!(error = %err, "Invalid model ID rejected by upstream");
+                // err message shape: "<api> API 请求失败: 400 Bad Request {json}".
+                // Forward Kiro's own message so the client shows actionable text
+                // instead of an opaque 502.
+                let detail = api_err
+                    .message
+                    .find('{')
+                    .and_then(|i| {
+                        serde_json::from_str::<serde_json::Value>(&api_err.message[i..]).ok()
+                    })
+                    .and_then(|v| {
+                        v.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "Kiro rejected the model ID.".to_string());
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new(
+                        "invalid_request_error",
+                        format!(
+                            "{} Use GET /v1/models to list supported models.",
+                            detail
+                        ),
+                    )),
+                )
+                    .into_response();
+            }
             429 => {
                 tracing::warn!(error = %err, "限流，透传 429 给客户端");
                 let mut resp = (
@@ -564,6 +593,7 @@ async fn handle_stream_request(
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive")
+        .header("x-accel-buffering", "no")
         .body(Body::from_stream(stream))
         .unwrap()
 }
@@ -1142,16 +1172,24 @@ async fn handle_non_stream_request(
 
     content.extend(tool_uses);
 
-    // token 用量优先级：metadataEvent 精确值 > contextUsageEvent 反推值 > 本地估算
-    let final_input_tokens = token_usage
-        .as_ref()
-        .and_then(|u| u.anthropic_input_tokens())
-        .or(context_input_tokens)
-        .unwrap_or(input_tokens);
+    // Token usage priority: metadataEvent exact > contextUsageEvent derived > local estimate.
+    // contextUsageEvent includes this turn's output, so subtract it to avoid
+    // double-counting (upstream fix: input_tokens excluding output).
     let final_output_tokens = token_usage
         .as_ref()
         .and_then(|u| u.anthropic_output_tokens())
         .unwrap_or_else(|| token::estimate_output_tokens(&content));
+    let final_input_tokens = token_usage
+        .as_ref()
+        .and_then(|u| u.anthropic_input_tokens())
+        .map(|v| v.max(0))
+        .unwrap_or_else(|| {
+            token::input_tokens_excluding_output(
+                context_input_tokens,
+                input_tokens,
+                final_output_tokens,
+            )
+        });
 
     // 记录模型累计用量（非流式路径，每请求一次）
     crate::model_stats::record(
@@ -1341,5 +1379,28 @@ mod tests {
         let err = anyhow::anyhow!("xxx CONTENT_LENGTH_EXCEEDS_THRESHOLD yyy");
         let resp = map_provider_error(err, true);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_map_provider_error_invalid_model_id_is_400() {
+        let err = anyhow::Error::new(UpstreamApiError {
+            status: 400,
+            message: "流式 API 请求失败: 400 Bad Request {\"message\":\"Invalid model. Please select a different model to continue.\",\"reason\":\"INVALID_MODEL_ID\"}".to_string(),
+            retry_after: None,
+        });
+        let resp = map_provider_error(err, true);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_map_provider_error_plain_400_is_502() {
+        // Non-model 400s stay opaque 502s (no credential/permission detail leak).
+        let err = anyhow::Error::new(UpstreamApiError {
+            status: 400,
+            message: "流式 API 请求失败: 400 Bad Request {\"message\":\"nope\"}".to_string(),
+            retry_after: None,
+        });
+        let resp = map_provider_error(err, true);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 }

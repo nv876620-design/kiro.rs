@@ -305,6 +305,15 @@ pub struct Config {
     #[serde(default)]
     pub passthrough_retry_after: bool,
 
+    /// Monthly quota auto-recovery (default false).
+    ///
+    /// When enabled, credentials disabled for `QuotaExceeded` are probed on
+    /// balance refresh: if the quota reset time has passed and remaining
+    /// quota is positive, the credential is re-enabled automatically
+    /// (upstream feat: quota reset recovery toggle).
+    #[serde(default)]
+    pub quota_reset_recovery_enabled: bool,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -462,6 +471,11 @@ fn default_trigger_lines() -> u32 {
 /// 顺序即匹配优先级（与原 `map_model` 的 if-else 顺序一致）。
 /// `get_models` / `map_model` / `get_context_window_size` 在配置未提供 `models` 时回退到此表。
 pub fn default_models() -> Vec<ModelDef> {
+    // NOTE: order is match priority for the fuzzy family+version fallback.
+    // Multi-component versions (4.8, 5.5) must precede single-digit ones
+    // ("5" would substring-match any "...-4-5..." name), and 4.x must
+    // precede 5.x for the same reason. Exact display_id/kiro_id matches
+    // always win regardless of order.
     vec![
         ModelDef {
             family: "opus".to_string(),
@@ -504,6 +518,26 @@ pub fn default_models() -> Vec<ModelDef> {
             context_window: 200_000,
         },
         ModelDef {
+            family: "opus".to_string(),
+            version: Some("5.5".to_string()),
+            kiro_id: "claude-opus-5.5".to_string(),
+            display_id: "claude-opus-5-5".to_string(),
+            display_name: "Claude Opus 5.5".to_string(),
+            created: 1780000000,
+            max_tokens: 64000,
+            context_window: 1_000_000,
+        },
+        ModelDef {
+            family: "opus".to_string(),
+            version: Some("5".to_string()),
+            kiro_id: "claude-opus-5".to_string(),
+            display_id: "claude-opus-5".to_string(),
+            display_name: "Claude Opus 5".to_string(),
+            created: 1776276000,
+            max_tokens: 64000,
+            context_window: 1_000_000,
+        },
+        ModelDef {
             family: "sonnet".to_string(),
             version: Some("4.6".to_string()),
             kiro_id: "claude-sonnet-4.6".to_string(),
@@ -524,6 +558,16 @@ pub fn default_models() -> Vec<ModelDef> {
             context_window: 200_000,
         },
         ModelDef {
+            family: "sonnet".to_string(),
+            version: Some("5".to_string()),
+            kiro_id: "claude-sonnet-5".to_string(),
+            display_id: "claude-sonnet-5".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            created: 1771286400,
+            max_tokens: 64000,
+            context_window: 1_000_000,
+        },
+        ModelDef {
             family: "haiku".to_string(),
             version: None,
             kiro_id: "claude-haiku-4.5".to_string(),
@@ -532,6 +576,36 @@ pub fn default_models() -> Vec<ModelDef> {
             created: 1760486400,
             max_tokens: 64000,
             context_window: 200_000,
+        },
+        ModelDef {
+            family: "gpt-5.6-sol".to_string(),
+            version: None,
+            kiro_id: "gpt-5.6-sol".to_string(),
+            display_id: "gpt-5.6-sol".to_string(),
+            display_name: "GPT 5.6 Sol".to_string(),
+            created: 1784000381,
+            max_tokens: 64000,
+            context_window: 1_000_000,
+        },
+        ModelDef {
+            family: "gpt-5.6-terra".to_string(),
+            version: None,
+            kiro_id: "gpt-5.6-terra".to_string(),
+            display_id: "gpt-5.6-terra".to_string(),
+            display_name: "GPT 5.6 Terra".to_string(),
+            created: 1784000462,
+            max_tokens: 64000,
+            context_window: 1_000_000,
+        },
+        ModelDef {
+            family: "gpt-5.6-luna".to_string(),
+            version: None,
+            kiro_id: "gpt-5.6-luna".to_string(),
+            display_id: "gpt-5.6-luna".to_string(),
+            display_name: "GPT 5.6 Luna".to_string(),
+            created: 1784000499,
+            max_tokens: 64000,
+            context_window: 1_000_000,
         },
     ]
 }
@@ -567,6 +641,7 @@ impl Default for Config {
             credential_rpm_haiku: None,
             credential_rpm_max_wait_ms: 0,
             passthrough_retry_after: false,
+            quota_reset_recovery_enabled: false,
             extract_thinking: default_extract_thinking(),
             chunked_write_policy: ChunkedWritePolicy::default(),
             codex_truncation_correction: default_codex_truncation_correction(),

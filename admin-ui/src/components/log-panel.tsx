@@ -15,7 +15,7 @@ import { extractErrorMessage } from '@/lib/utils'
 const POLL_INTERVAL_MS = 1000
 const MAX_RENDER_LINES = 2000
 
-// 级别 → 文本颜色
+// Level → text color
 function levelClass(level: string): string {
   switch (level) {
     case 'ERROR':
@@ -40,7 +40,7 @@ export function LogPanel() {
   const autoScrollRef = useRef(autoScroll)
   autoScrollRef.current = autoScroll
 
-  // 轮询拉取增量日志
+  // Poll for incremental log lines
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -61,7 +61,7 @@ export function LogPanel() {
           }
         }
       } catch {
-        // 轮询期间的偶发错误静默忽略，下次继续
+        // Silently ignore transient errors during polling; retry on the next tick
       }
       if (!cancelled) timer = setTimeout(poll, POLL_INTERVAL_MS)
     }
@@ -73,7 +73,7 @@ export function LogPanel() {
     }
   }, [])
 
-  // 新日志到达时自动滚动到底部
+  // Auto-scroll to the bottom when new logs arrive
   useEffect(() => {
     if (autoScrollRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
@@ -85,7 +85,7 @@ export function LogPanel() {
     try {
       await setLogCapture(enabled)
     } catch (e) {
-      toast.error(`切换日志捕获失败: ${extractErrorMessage(e)}`)
+      toast.error(`Failed to toggle log capture: ${extractErrorMessage(e)}`)
     }
   }, [])
 
@@ -93,9 +93,9 @@ export function LogPanel() {
     try {
       await clearLogs()
       setLines([])
-      // 不重置 lastSeq：后端序号继续递增，避免拉到已清空的旧行
+      // Don't reset lastSeq: the backend sequence keeps increasing, which avoids pulling stale lines that were already cleared
     } catch (e) {
-      toast.error(`清空日志失败: ${extractErrorMessage(e)}`)
+      toast.error(`Failed to clear logs: ${extractErrorMessage(e)}`)
     }
   }, [])
 
@@ -103,25 +103,25 @@ export function LogPanel() {
     <Card className="flex flex-col overflow-hidden" style={{ height: 'calc(100vh - 12rem)' }}>
       <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
         <div className="flex items-center gap-2 text-sm font-medium">
-          运行日志
+          Runtime Logs
           <span className="text-xs font-normal text-muted-foreground">
-            （{lines.length} 行，最多保留 {MAX_RENDER_LINES}）
+            ({lines.length} lines, up to {MAX_RENDER_LINES} kept)
           </span>
         </div>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             {capturing ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-            捕获
+            Capture
             <Switch checked={capturing} onCheckedChange={handleToggleCapture} />
           </label>
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <ArrowDownToLine className="h-3.5 w-3.5" />
-            自动滚动
+            Auto-scroll
             <Switch checked={autoScroll} onCheckedChange={setAutoScroll} />
           </label>
           <Button variant="outline" size="sm" onClick={handleClear}>
             <Trash2 className="mr-1 h-3.5 w-3.5" />
-            清空
+            Clear
           </Button>
         </div>
       </div>
@@ -132,7 +132,7 @@ export function LogPanel() {
       >
         {lines.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
-            {capturing ? '暂无日志，等待输出…' : '日志捕获已关闭'}
+            {capturing ? 'No logs yet, waiting for output…' : 'Log capture is off'}
           </div>
         ) : (
           lines.map((l) => (

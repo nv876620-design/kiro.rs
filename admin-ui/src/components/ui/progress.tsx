@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 interface ProgressProps extends React.HTMLAttributes<HTMLDivElement> {
   value?: number
   max?: number
-  /// 自定义进度条颜色类（不传则按占用比例自动着色：高占用偏红）
+  /// Custom progress bar color class (auto-colored by usage ratio when omitted: high usage trends red)
   indicatorClassName?: string
 }
 

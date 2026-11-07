@@ -44,6 +44,16 @@
       "contextWindow": 1000000
     },
     {
+      "family": "opus",
+      "version": "5.5",
+      "kiroId": "claude-opus-5.5",
+      "displayId": "claude-opus-5-5",
+      "displayName": "Claude Opus 5.5",
+      "created": 1780000000,
+      "maxTokens": 64000,
+      "contextWindow": 1000000
+    },
+    {
       "family": "haiku",
       "kiroId": "claude-haiku-4.5",
       "displayId": "claude-haiku-4-5-20251001",
@@ -59,7 +69,7 @@
       "displayName": "GPT 5.6 Sol",
       "created": 1784000381,
       "maxTokens": 64000,
-      "contextWindow": 272000
+      "contextWindow": 1000000
     },
     {
       "family": "gpt-5.6-terra",
@@ -68,7 +78,7 @@
       "displayName": "GPT 5.6 Terra",
       "created": 1784000462,
       "maxTokens": 64000,
-      "contextWindow": 272000
+      "contextWindow": 1000000
     },
     {
       "family": "gpt-5.6-luna",
@@ -77,7 +87,7 @@
       "displayName": "GPT 5.6 Luna",
       "created": 1784000499,
       "maxTokens": 64000,
-      "contextWindow": 200050
+      "contextWindow": 1000000
     },
     {
       "family": "sonnet",
@@ -96,6 +106,7 @@
     "gpt-5.4-mini": "gpt-5.6-luna"
   },
   "defaultModel": "gpt-5.6-luna",
+  "quotaResetRecoveryEnabled": false,
   "credentialRpm": 0,
   "credentialRpmOpus": 0,
   "credentialRpmSonnet": 0,

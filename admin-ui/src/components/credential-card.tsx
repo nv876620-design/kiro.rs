@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
+import { CredentialDetailDialog } from '@/components/credential-detail-dialog'
 import {
   useSetDisabled,
   useSetPriority,
@@ -48,33 +49,33 @@ interface CredentialCardProps {
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
-  if (!lastUsedAt) return '从未使用'
+  if (!lastUsedAt) return 'Never used'
   const date = new Date(lastUsedAt)
   const now = new Date()
   const diff = now.getTime() - date.getTime()
-  if (diff < 0) return '刚刚'
+  if (diff < 0) return 'Just now'
   const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return `${seconds} 秒前`
+  if (seconds < 60) return `${seconds}s ago`
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} 分钟前`
+  if (minutes < 60) return `${minutes}m ago`
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
+  if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
-  return `${days} 天前`
+  return `${days}d ago`
 }
 
-// 构造凭据级 RPM 占用展示：仅显示有上限（>0）的模型类别，格式如 "Opus 2/5"
+// Build RPM usage display per credential: only show categories with limits (>0), format like "Opus 2/5"
 function formatRpmUsage(rpm: CredentialStatusItem['rpm']): string | null {
   if (!rpm) return null
   const parts: string[] = []
   if (rpm.limitOpus > 0) parts.push(`Opus ${rpm.counts.opus}/${rpm.limitOpus}`)
   if (rpm.limitSonnet > 0) parts.push(`Sonnet ${rpm.counts.sonnet}/${rpm.limitSonnet}`)
   if (rpm.limitHaiku > 0) parts.push(`Haiku ${rpm.counts.haiku}/${rpm.limitHaiku}`)
-  if (rpm.limitOther > 0) parts.push(`其他 ${rpm.counts.other}/${rpm.limitOther}`)
-  return parts.length > 0 ? parts.join('，') : null
+  if (rpm.limitOther > 0) parts.push(`Other ${rpm.counts.other}/${rpm.limitOther}`)
+  return parts.length > 0 ? parts.join(', ') : null
 }
 
-// 认证方式的展示名
+// Auth method display name
 function authMethodLabel(method: string | null | undefined): string | null {
   if (!method) return null
   switch (method) {
@@ -89,19 +90,19 @@ function authMethodLabel(method: string | null | undefined): string | null {
   }
 }
 
-// 透传凭据的类型标签（Kiro 凭据返回 null，不显示）
+// Passthrough credential type label (Kiro credentials return null, not shown)
 function passthroughKindLabel(kind: string | null | undefined): string | null {
   switch (kind) {
     case 'anthropic':
-      return 'Claude 透传'
+      return 'Claude Passthrough'
     case 'openai':
-      return 'Codex 透传'
+      return 'Codex Passthrough'
     default:
       return null
   }
 }
 
-// 凭据健康状态：驱动标题前的状态圆点
+// Credential health status: drives the status dot before title
 type Health = 'active' | 'ok' | 'warn' | 'disabled'
 
 function credentialHealth(credential: CredentialStatusItem): Health {
@@ -112,13 +113,13 @@ function credentialHealth(credential: CredentialStatusItem): Health {
 }
 
 const healthDot: Record<Health, { color: string; label: string }> = {
-  active: { color: 'bg-primary', label: '当前活跃' },
-  ok: { color: 'bg-success', label: '正常' },
-  warn: { color: 'bg-warning', label: '存在失败记录' },
-  disabled: { color: 'bg-muted-foreground/50', label: '已禁用' },
+  active: { color: 'bg-primary', label: 'Currently Active' },
+  ok: { color: 'bg-success', label: 'Normal' },
+  warn: { color: 'bg-warning', label: 'Has Failure Records' },
+  disabled: { color: 'bg-muted-foreground/50', label: 'Disabled' },
 }
 
-// 一行元信息：标签在左，值靠右
+// Meta row: label on left, value on right
 function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-2 text-sm">
@@ -141,6 +142,7 @@ export function CredentialCard({
   const [editingName, setEditingName] = useState(false)
   const [nameValue, setNameValue] = useState(credential.name ?? '')
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showDetailDialog, setShowDetailDialog] = useState(false)
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
@@ -157,7 +159,7 @@ export function CredentialCard({
           toast.success(res.message)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('Operation failed: ' + (err as Error).message)
         },
       }
     )
@@ -166,7 +168,7 @@ export function CredentialCard({
   const handlePriorityChange = () => {
     const newPriority = parseInt(priorityValue, 10)
     if (isNaN(newPriority) || newPriority < 0) {
-      toast.error('优先级必须是非负整数')
+      toast.error('Priority must be a non-negative integer')
       return
     }
     setPriority.mutate(
@@ -177,7 +179,7 @@ export function CredentialCard({
           setEditingPriority(false)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('Operation failed: ' + (err as Error).message)
         },
       }
     )
@@ -190,7 +192,7 @@ export function CredentialCard({
 
   const handleNameChange = () => {
     const trimmed = nameValue.trim()
-    // 与当前值一致（都为空或字符串相同）则直接收起，不发请求
+    // If it matches the current value (both empty or identical strings), collapse the editor without sending a request
     if (trimmed === (credential.name ?? '')) {
       setEditingName(false)
       return
@@ -203,7 +205,7 @@ export function CredentialCard({
           setEditingName(false)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('Operation failed: ' + (err as Error).message)
         },
       }
     )
@@ -215,7 +217,7 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('操作失败: ' + (err as Error).message)
+        toast.error('Operation failed: ' + (err as Error).message)
       },
     })
   }
@@ -226,14 +228,14 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('刷新失败: ' + (err as Error).message)
+        toast.error('Refresh failed: ' + (err as Error).message)
       },
     })
   }
 
   const handleDelete = () => {
     if (!credential.disabled) {
-      toast.error('请先禁用凭据再删除')
+      toast.error('Disable the credential before deleting it')
       setShowDeleteDialog(false)
       return
     }
@@ -244,7 +246,7 @@ export function CredentialCard({
         setShowDeleteDialog(false)
       },
       onError: (err) => {
-        toast.error('删除失败: ' + (err as Error).message)
+        toast.error('Delete failed: ' + (err as Error).message)
       },
     })
   }
@@ -256,8 +258,8 @@ export function CredentialCard({
   const isPassthrough = kindLabel !== null
   const rpmUsage = formatRpmUsage(credential.rpm)
   const hasFailure = credential.failureCount > 0 || credential.refreshFailureCount > 0
-  const title = credential.name || credential.email || `凭据 #${credential.id}`
-  // 有自定义名或邮箱作标题时，副标题才显示 #ID，避免「凭据 #3 / #3」重复
+  const title = credential.name || credential.email || `Credential #${credential.id}`
+  // Show #ID in subtitle only when custom name or email is used as title, to avoid "Credential #3 / #3" duplication
   const showIdInSub = Boolean(credential.name || credential.email)
   const remainingPct = balance ? 100 - balance.usagePercentage : null
 
@@ -289,7 +291,7 @@ export function CredentialCard({
                         if (e.key === 'Enter') handleNameChange()
                         if (e.key === 'Escape') setEditingName(false)
                       }}
-                      placeholder="备注名（留空清除）"
+                      placeholder="Display name (empty to clear)"
                       autoFocus
                       className="h-7 min-w-0 flex-1 text-sm"
                     />
@@ -323,7 +325,7 @@ export function CredentialCard({
                       type="button"
                       className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-primary group-hover:opacity-100"
                       onClick={startEditName}
-                      title="编辑备注名"
+                      title="Edit display name"
                     >
                       <Pencil className="h-3 w-3" />
                     </button>
@@ -370,11 +372,11 @@ export function CredentialCard({
             />
           </div>
 
-          {/* 状态 badge 行（仅在有内容时出现） */}
+          {/* Status badge row (only appears when there's content) */}
           {(credential.isCurrent || credential.disabled || credential.hasProfileArn) && (
             <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-              {credential.isCurrent && <Badge variant="success">当前活跃</Badge>}
-              {credential.disabled && <Badge variant="destructive">已禁用</Badge>}
+              {credential.isCurrent && <Badge variant="success">Currently Active</Badge>}
+              {credential.disabled && <Badge variant="destructive">Disabled</Badge>}
               {credential.disabled && credential.disabledReason && (
                 <Badge variant="outline" className="text-destructive">
                   {credential.disabledReason}
@@ -386,13 +388,13 @@ export function CredentialCard({
         </CardHeader>
 
         <CardContent className="flex flex-1 flex-col gap-3 p-4 pt-0">
-          {/* 余额区：透传凭据只有余额（无总额/百分比），Kiro 凭据显示剩余用量百分比 */}
+          {/* Balance area: passthrough credentials only expose a balance (no total/percentage), Kiro credentials show the remaining usage percentage */}
           {isPassthrough ? (
             <div className="rounded-lg bg-muted/40 p-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Wallet className="h-3.5 w-3.5" />
-                  <span>账户余额</span>
+                  <span>Account Balance</span>
                   {!loadingBalance && balance?.subscriptionTitle && (
                     <Badge variant="secondary" className="ml-0.5 px-1.5 py-0 text-[10px]">
                       {balance.subscriptionTitle}
@@ -412,16 +414,16 @@ export function CredentialCard({
                     {balance.remaining.toFixed(2)}
                   </span>
                 ) : (
-                  <span className="text-xs text-muted-foreground">未知</span>
+                  <span className="text-xs text-muted-foreground">Unknown</span>
                 )}
               </div>
               {!balance && !loadingBalance && (
                 <div className="mt-1.5 text-[11px] text-muted-foreground">
-                  点击「查看余额」获取账户余额
+                  Click "View Balance" to fetch the account balance
                 </div>
               )}
               {balance && !loadingBalance && balance.remaining <= 0 && (
-                <div className="mt-1.5 text-[11px] text-destructive">余额已耗尽</div>
+                <div className="mt-1.5 text-[11px] text-destructive">Balance exhausted</div>
               )}
             </div>
           ) : (
@@ -429,7 +431,7 @@ export function CredentialCard({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Wallet className="h-3.5 w-3.5" />
-                  <span>剩余用量</span>
+                  <span>Remaining Usage</span>
                   {!loadingBalance && balance?.subscriptionTitle && (
                     <Badge variant="secondary" className="ml-0.5 px-1.5 py-0 text-[10px]">
                       {balance.subscriptionTitle}
@@ -438,47 +440,57 @@ export function CredentialCard({
                 </div>
                 {loadingBalance ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                ) : balance && balance.usageLimit <= 0 && (balance.subscriptionTitle?.toLowerCase().includes('enterprise') || balance.subscriptionTitle?.toLowerCase().includes('idc')) ? (
+                  <span className="text-sm font-semibold text-green-600 dark:text-green-400">
+                    Enterprise Active
+                  </span>
                 ) : remainingPct !== null ? (
                   <span className="text-lg font-bold leading-none tabular-nums">
                     {remainingPct.toFixed(0)}
                     <span className="ml-0.5 text-xs font-normal text-muted-foreground">%</span>
                   </span>
                 ) : (
-                  <span className="text-xs text-muted-foreground">未知</span>
+                  <span className="text-xs text-muted-foreground">Unknown</span>
                 )}
               </div>
               {balance && !loadingBalance ? (
-                <>
-                  <Progress
-                    value={remainingPct ?? 0}
-                    max={100}
-                    className="mt-2 h-1.5"
-                    indicatorClassName={
-                      (remainingPct ?? 0) < 20
-                        ? 'bg-destructive'
-                        : (remainingPct ?? 0) < 40
-                          ? 'bg-warning'
-                          : 'bg-success'
-                    }
-                  />
-                  <div className="mt-1.5 text-right text-[11px] text-muted-foreground tabular-nums">
-                    剩 {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
+                balance.usageLimit <= 0 && (balance.subscriptionTitle?.toLowerCase().includes('enterprise') || balance.subscriptionTitle?.toLowerCase().includes('idc')) ? (
+                  <div className="mt-1.5 text-[11px] text-muted-foreground">
+                    Managed via IAM Identity Center (Unlimited quota)
                   </div>
-                </>
+                ) : (
+                  <>
+                    <Progress
+                      value={remainingPct ?? 0}
+                      max={100}
+                      className="mt-2 h-1.5"
+                      indicatorClassName={
+                        (remainingPct ?? 0) < 20
+                          ? 'bg-destructive'
+                          : (remainingPct ?? 0) < 40
+                            ? 'bg-warning'
+                            : 'bg-success'
+                      }
+                    />
+                    <div className="mt-1.5 text-right text-[11px] text-muted-foreground tabular-nums">
+                      Left {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
+                    </div>
+                  </>
+                )
               ) : (
                 !loadingBalance && (
                   <div className="mt-1.5 text-[11px] text-muted-foreground">
-                    点击「查询信息」或「查看余额」获取用量
+                    Click "Query Info" or "View Balance" to fetch usage
                   </div>
                 )
               )}
             </div>
           )}
 
-          {/* 元信息：标签—值 竖排 */}
+          {/* Meta info: label-value rows */}
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2 text-sm">
-              <span className="text-muted-foreground">优先级</span>
+              <span className="text-muted-foreground">Priority</span>
               {editingPriority ? (
                 <span className="flex items-center gap-1">
                   <Input
@@ -514,7 +526,7 @@ export function CredentialCard({
                   type="button"
                   className="inline-flex items-center gap-1 font-medium hover:text-primary"
                   onClick={() => setEditingPriority(true)}
-                  title="点击编辑优先级"
+                  title="Click to edit the priority"
                 >
                   {credential.priority}
                   <Pencil className="h-3 w-3 text-muted-foreground" />
@@ -522,7 +534,7 @@ export function CredentialCard({
               )}
             </div>
 
-            <MetaRow label="成功 / 失败">
+            <MetaRow label="Success / Failure">
               <span className="text-success">{credential.successCount}</span>
               <span className="mx-1 text-muted-foreground">/</span>
               <span className={hasFailure ? 'text-destructive' : ''}>
@@ -530,14 +542,16 @@ export function CredentialCard({
               </span>
               {credential.refreshFailureCount > 0 && (
                 <span className="ml-1 text-xs text-destructive">
-                  刷新 {credential.refreshFailureCount}
+                  Refresh {credential.refreshFailureCount}
                 </span>
               )}
             </MetaRow>
 
-            <MetaRow label="最后调用">{formatLastUsed(credential.lastUsedAt)}</MetaRow>
+            <MetaRow label="Last Used">{formatLastUsed(credential.lastUsedAt)}</MetaRow>
 
-            {rpmUsage && <MetaRow label="RPM 占用">{rpmUsage}</MetaRow>}
+            {credential.email && <MetaRow label="Email">{credential.email}</MetaRow>}
+
+            {rpmUsage && <MetaRow label="RPM Usage">{rpmUsage}</MetaRow>}
 
             {credential.maskedApiKey && (
               <MetaRow label="API Key">
@@ -546,14 +560,23 @@ export function CredentialCard({
             )}
 
             {credential.hasProxy && (
-              <MetaRow label="代理">
+              <MetaRow label="Proxy">
                 <span title={credential.proxyUrl}>{credential.proxyUrl}</span>
               </MetaRow>
             )}
           </div>
 
-          {/* 操作区 */}
+          {/* Actions */}
           <div className="mt-auto flex items-center gap-1.5 border-t pt-3">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowDetailDialog(true)}
+              title="Edit credential details"
+            >
+              <Pencil className="h-4 w-4" />
+              Edit
+            </Button>
             <Button
               size="sm"
               variant="secondary"
@@ -561,7 +584,7 @@ export function CredentialCard({
               onClick={() => onViewBalance(credential.id)}
             >
               <Wallet className="mr-1 h-4 w-4" />
-              查看余额
+              View Balance
             </Button>
             <Button
               size="icon"
@@ -576,12 +599,12 @@ export function CredentialCard({
               }
               title={
                 isPassthrough
-                  ? '透传凭据无需刷新 Token'
+                  ? 'Passthrough credentials do not need a token refresh'
                   : credential.authMethod === 'api_key'
-                    ? 'API Key 凭据无需刷新 Token'
+                    ? 'API Key credentials do not need a token refresh'
                     : credential.disabled
-                      ? '已禁用的凭据无法刷新 Token'
-                      : '强制刷新 Token'
+                      ? 'Disabled credentials cannot refresh the token'
+                      : 'Force token refresh'
               }
             >
               <RefreshCw className={cn('h-4 w-4', forceRefresh.isPending && 'animate-spin')} />
@@ -592,7 +615,7 @@ export function CredentialCard({
               className="h-8 w-8"
               onClick={handleReset}
               disabled={resetFailure.isPending || !hasFailure}
-              title="重置失败计数"
+              title="Reset failure count"
             >
               <RotateCcw className="h-4 w-4" />
             </Button>
@@ -601,14 +624,14 @@ export function CredentialCard({
               size="icon"
               variant="ghost"
               className="h-8 w-8"
-              title="提高优先级"
+              title="Increase priority"
               onClick={() => {
                 const newPriority = Math.max(0, credential.priority - 1)
                 setPriority.mutate(
                   { id: credential.id, priority: newPriority },
                   {
                     onSuccess: (res) => toast.success(res.message),
-                    onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+                    onError: (err) => toast.error('Operation failed: ' + (err as Error).message),
                   }
                 )
               }}
@@ -620,14 +643,14 @@ export function CredentialCard({
               size="icon"
               variant="ghost"
               className="h-8 w-8"
-              title="降低优先级"
+              title="Decrease priority"
               onClick={() => {
                 const newPriority = credential.priority + 1
                 setPriority.mutate(
                   { id: credential.id, priority: newPriority },
                   {
                     onSuccess: (res) => toast.success(res.message),
-                    onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+                    onError: (err) => toast.error('Operation failed: ' + (err as Error).message),
                   }
                 )
               }}
@@ -641,7 +664,7 @@ export function CredentialCard({
               className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
               onClick={() => setShowDeleteDialog(true)}
               disabled={!credential.disabled}
-              title={!credential.disabled ? '需要先禁用凭据才能删除' : '删除凭据'}
+              title={!credential.disabled ? 'Disable the credential before deleting it' : 'Delete credential'}
             >
               <Trash2 className="h-4 w-4" />
             </Button>
@@ -649,13 +672,13 @@ export function CredentialCard({
         </CardContent>
       </Card>
 
-      {/* 删除确认对话框 */}
+      {/* Delete confirmation dialog */}
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认删除凭据</DialogTitle>
+            <DialogTitle>Confirm Credential Deletion</DialogTitle>
             <DialogDescription>
-              您确定要删除凭据 #{credential.id} 吗？此操作无法撤销。
+              Are you sure you want to delete credential #{credential.id}? This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -664,18 +687,23 @@ export function CredentialCard({
               onClick={() => setShowDeleteDialog(false)}
               disabled={deleteCredential.isPending}
             >
-              取消
+              Cancel
             </Button>
             <Button
               variant="destructive"
               onClick={handleDelete}
               disabled={deleteCredential.isPending || !credential.disabled}
             >
-              确认删除
+              Delete
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <CredentialDetailDialog
+        credentialId={credential.id}
+        open={showDetailDialog}
+        onOpenChange={setShowDetailDialog}
+      />
     </>
   )
 }

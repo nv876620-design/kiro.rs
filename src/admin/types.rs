@@ -109,7 +109,7 @@ pub struct SetNameRequest {
 }
 
 /// 添加凭据请求
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddCredentialRequest {
     /// 自定义备注名（可选，Admin UI 展示用）
@@ -117,6 +117,16 @@ pub struct AddCredentialRequest {
 
     /// 刷新令牌（OAuth 凭据必填，API Key 凭据不需要）
     pub refresh_token: Option<String>,
+
+    /// 访问令牌（导入备份/KAM 导出时可选，保留可避免首次请求强制刷新）
+    pub access_token: Option<String>,
+
+    /// Profile ARN（导入备份/KAM 导出时可选）
+    pub profile_arn: Option<String>,
+
+    /// 过期时间（兼容 KAM 的 RFC3339 字符串或毫秒时间戳）
+    #[serde(default, deserialize_with = "deserialize_optional_expires_at")]
+    pub expires_at: Option<String>,
 
     /// 认证方式（可选，默认 social）
     #[serde(default = "default_auth_method")]
@@ -127,6 +137,25 @@ pub struct AddCredentialRequest {
 
     /// OIDC Client Secret（IdC 认证需要）
     pub client_secret: Option<String>,
+
+    /// OAuth / SSO Provider（BuilderId / Enterprise / AzureAD 等）
+    pub provider: Option<String>,
+
+    /// External IdP / Enterprise SSO 的 start URL
+    pub start_url: Option<String>,
+
+    /// External IdP 的 token endpoint
+    pub token_endpoint: Option<String>,
+
+    /// External IdP 的 issuer URL
+    pub issuer_url: Option<String>,
+
+    /// External IdP 请求的 scopes
+    pub scopes: Option<String>,
+
+    /// 凭据是否禁用（默认 false，备份恢复时保留原状态）
+    #[serde(default)]
+    pub disabled: bool,
 
     /// 优先级（可选，默认 0）
     #[serde(default)]
@@ -184,6 +213,25 @@ fn default_auth_method() -> String {
     "social".to_string()
 }
 
+/// 兼容 KAM 的 `expiresAt`：可接受 RFC3339 字符串或毫秒时间戳。
+fn deserialize_optional_expires_at<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text),
+        serde_json::Value::Number(number) => {
+            let raw = number.as_i64()?;
+            // KAM 使用毫秒时间戳；为兼容部分旧导出也接受秒级时间戳。
+            let millis = if raw > 10_000_000_000 { raw } else { raw * 1000 };
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
+                .map(|dt| dt.to_rfc3339())
+        }
+        _ => None,
+    }))
+}
+
 /// 添加凭据成功响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -195,6 +243,152 @@ pub struct AddCredentialResponse {
     /// 用户邮箱（如果获取成功）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+}
+
+// ============ 凭据导入导出 ============
+
+/// 批量导入凭据请求
+///
+/// `credentials` 接受原始 JSON 对象数组（与 `credentials.json` 多凭据格式、
+/// 批量导入对话框的粘贴格式兼容）；未知字段会被忽略，缺失字段沿用
+/// `AddCredentialRequest` 的默认值。单个对象也会被前端归一为数组。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCredentialsRequest {
+    pub credentials: Vec<serde_json::Value>,
+}
+
+/// 导入失败条目
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFailedItem {
+    /// 下标（从 0 开始，对应输入数组的位置）
+    pub index: usize,
+    /// 失败原因（英文，前端直接展示）
+    pub error: String,
+}
+
+/// 批量导入凭据响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCredentialsResponse {
+    pub success: bool,
+    /// 成功导入数
+    pub added: usize,
+    /// 重复跳过数
+    pub duplicates: usize,
+    /// 失败条目
+    pub failed: Vec<ImportFailedItem>,
+    /// 新凭据 ID 列表（按导入顺序）
+    pub credential_ids: Vec<u64>,
+}
+
+/// 凭据导出格式（`GET /credentials/export?format=...`）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCredentialsQuery {
+    /// 默认 `kam`；传 `flat` 可导回旧的扁平数组格式。
+    pub format: Option<String>,
+}
+
+/// KAM / ZyphrZero 兼容的凭据导出 envelope。
+///
+/// KAM（Kiro Account Manager）与 ZyphrZero 的导入器识别
+/// `{ version, exportedAt, accounts: [{ credentials: {...} }] }`。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialsExportResponse {
+    pub version: String,
+    /// 毫秒时间戳（KAM 使用毫秒）
+    pub exported_at: i64,
+    pub accounts: Vec<ExportedAccount>,
+    pub groups: Vec<serde_json::Value>,
+    pub tags: Vec<serde_json::Value>,
+}
+
+/// KAM 导出中的单个账号
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedAccount {
+    pub id: String,
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    pub idp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
+    pub credentials: ExportedCredentials,
+    pub subscription: serde_json::Value,
+    pub usage: serde_json::Value,
+    pub tags: Vec<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub last_used_at: i64,
+}
+
+/// KAM 导出中的凭据字段（含本仓库备份所需的扩展字段）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedCredentials {
+    /// KAM 导出结构要求该字段存在；没有访问令牌时输出空字符串。
+    pub access_token: String,
+    /// 本仓库没有 CSRF token，输出空字符串以保持结构兼容。
+    pub csrf_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// KAM 的 `region` 对应本仓库的 authRegion（OIDC token 刷新区域）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    /// 毫秒时间戳（KAM / ZyphrZero 约定）
+    pub expires_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kiro_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_title: Option<String>,
 }
 
 // ============ 余额查询 ============
@@ -279,6 +473,8 @@ pub struct AppConfigResponse {
     pub chunked_write_policy: ChunkedWritePolicy,
     /// codex（/v1/responses）工具参数截断纠正开关
     pub codex_truncation_correction: bool,
+    /// Monthly quota auto-recovery toggle (default false)
+    pub quota_reset_recovery_enabled: bool,
     /// 全局代理 URL（config.json 的 proxyUrl）。所有凭据默认走它，凭据可单独覆盖。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
@@ -337,6 +533,9 @@ pub struct UpdateAppConfigRequest {
     /// codex 工具参数截断纠正开关；缺省时不更新（兼容旧 Admin UI）
     #[serde(default)]
     pub codex_truncation_correction: Option<bool>,
+    /// Monthly quota auto-recovery toggle; None means no change (older UI compat)
+    #[serde(default)]
+    pub quota_reset_recovery_enabled: Option<bool>,
     /// 全局代理 URL；空字符串表示清除，字段缺失则不更新（兼容旧 UI）。需重启生效。
     #[serde(default)]
     pub proxy_url: Option<String>,
@@ -526,4 +725,16 @@ impl AdminErrorResponse {
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::new("internal_error", message)
     }
+}
+
+// ============ Available Models ============
+
+/// 可用模型列表响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableModelsResponse {
+    /// Anthropic/Kiro 凭据中的模型
+    pub anthropic_models: Vec<String>,
+    /// OpenAI 透传凭据中的模型
+    pub openai_models: Vec<String>,
 }

@@ -9,8 +9,9 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetNameRequest,
-        SetPriorityRequest, SuccessResponse, TimeseriesQuery, UpdateAppConfigRequest,
+        AddCredentialRequest, ExportCredentialsQuery, ImportCredentialsRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetNameRequest, SetPriorityRequest, SuccessResponse,
+        TimeseriesQuery, UpdateAppConfigRequest,
     },
 };
 
@@ -189,4 +190,35 @@ pub async fn update_app_config(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// GET /api/admin/config/available-models
+/// 获取可用模型列表（从凭据中提取）
+pub async fn get_available_models(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_available_models().await)
+}
+
+/// GET /api/admin/credentials/export
+/// 导出全部凭据（含 secrets，用于备份/迁移；须 Admin 权限）
+///
+/// 默认返回 KAM / ZyphrZero 兼容的 `{ version, exportedAt, accounts }`；
+/// `?format=flat` 返回旧的扁平数组。
+pub async fn export_credentials(
+    State(state): State<AdminState>,
+    Query(query): Query<ExportCredentialsQuery>,
+) -> impl IntoResponse {
+    if query.format.as_deref() == Some("flat") {
+        Json(state.service.export_credentials_flat()).into_response()
+    } else {
+        Json(state.service.export_credentials()).into_response()
+    }
+}
+
+/// POST /api/admin/credentials/import
+/// 批量导入凭据（备份恢复/迁移；逐条复用添加流程，重复自动跳过）
+pub async fn import_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<ImportCredentialsRequest>,
+) -> impl IntoResponse {
+    Json(state.service.import_credentials(payload.credentials).await)
 }

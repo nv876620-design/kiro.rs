@@ -39,15 +39,15 @@ export function BatchVerifyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>批量验活</DialogTitle>
+          <DialogTitle>Batch Verify</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {/* 进度显示 */}
+          {/* Progress */}
           {verifying && (
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>验活进度</span>
+                <span>Verification progress</span>
                 <span>{progress.current} / {progress.total}</span>
               </div>
               <div className="w-full bg-secondary rounded-full h-2">
@@ -59,17 +59,17 @@ export function BatchVerifyDialog({
             </div>
           )}
 
-          {/* 统计信息 */}
+          {/* Statistics */}
           {results.size > 0 && (
             <div className="flex justify-between text-sm font-medium">
-              <span>验活结果</span>
+              <span>Verification results</span>
               <span>
-                成功: {successCount} / 失败: {failedCount}
+                Success: {successCount} / Failed: {failedCount}
               </span>
             </div>
           )}
 
-          {/* 结果列表 */}
+          {/* Result list */}
           {results.size > 0 && (
             <div className="max-h-[400px] overflow-y-auto border rounded-md p-2 space-y-1">
               {resultsArray.map((result) => (
@@ -87,7 +87,7 @@ export function BatchVerifyDialog({
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium">凭据 #{result.id}</span>
+                      <span className="font-medium">Credential #{result.id}</span>
                       {result.status === 'success' && result.usage && (
                         <Badge variant="secondary" className="text-xs">
                           {result.usage}
@@ -103,7 +103,7 @@ export function BatchVerifyDialog({
                   </div>
                   {result.error && (
                     <div className="text-xs mt-1 opacity-90">
-                      错误: {result.error}
+                      Error: {result.error}
                     </div>
                   )}
                 </div>
@@ -111,10 +111,10 @@ export function BatchVerifyDialog({
             </div>
           )}
 
-          {/* 提示信息 */}
+          {/* Hint */}
           {verifying && (
             <p className="text-xs text-muted-foreground">
-              💡 验活过程中每次请求间隔 2 秒，防止被封号。你可以关闭此窗口，验活会在后台继续进行。
+              💡 Each request during verification is spaced 2 seconds apart to avoid account bans. You can close this window; verification continues in the background.
             </p>
           )}
         </div>
@@ -127,14 +127,14 @@ export function BatchVerifyDialog({
                 variant="outline"
                 onClick={() => onOpenChange(false)}
               >
-                后台运行
+                Run in Background
               </Button>
               <Button
                 type="button"
                 variant="destructive"
                 onClick={onCancel}
               >
-                取消验活
+                Cancel Verification
               </Button>
             </>
           ) : (
@@ -142,7 +142,7 @@ export function BatchVerifyDialog({
               type="button"
               onClick={() => onOpenChange(false)}
             >
-              关闭
+              Close
             </Button>
           )}
         </div>

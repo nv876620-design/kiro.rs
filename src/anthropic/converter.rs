@@ -437,12 +437,18 @@ pub fn conversion_error_parts(e: &ConversionError) -> (&'static str, String) {
 ///
 /// 提取 session UUID 作为 conversationId
 pub(crate) fn extract_session_id(user_id: &str) -> Option<String> {
-    // 先尝试 JSON 解析
+    // Try JSON first. If the payload is valid JSON, trust it: a missing or
+    // empty session_id means "no session" — do NOT fall back to substring
+    // matching, which would misread e.g. `"session_id":""` as containing
+    // `session_` (upstream fix: recognize Codex session IDs for metering).
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id) {
-        if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
-            if is_valid_uuid(session_id) {
-                return Some(session_id.to_string());
+        if json.is_object() {
+            if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
+                if is_valid_uuid(session_id) {
+                    return Some(session_id.to_string());
+                }
             }
+            return None;
         }
     }
 

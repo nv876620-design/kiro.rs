@@ -13,9 +13,15 @@ import type {
   UpdateAppConfigRequest,
   MetricsResponse,
   TimeseriesResponse,
+  CredentialDetail,
+  CredentialExportItem,
+  CredentialsExportFile,
+  ImportCredentialsResponse,
+  UpdateCredentialRequest,
+  AvailableModelsResponse,
 } from '@/types/api'
 
-// 创建 axios 实例
+// Create the axios instance
 const api = axios.create({
   baseURL: '/api/admin',
   headers: {
@@ -23,7 +29,7 @@ const api = axios.create({
   },
 })
 
-// 请求拦截器添加 API Key
+// Request interceptor: attach the API Key
 api.interceptors.request.use((config) => {
   const apiKey = storage.getApiKey()
   if (apiKey) {
@@ -32,19 +38,19 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// 获取所有凭据状态
+// Get all credential statuses
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
   const { data } = await api.get<CredentialsStatusResponse>('/credentials')
   return data
 }
 
-// 获取监控指标
+// Get monitoring metrics
 export async function getMetrics(): Promise<MetricsResponse> {
   const { data } = await api.get<MetricsResponse>('/metrics')
   return data
 }
 
-// 获取监控时间序列（趋势 + 按模型/凭据分布）
+// Get monitoring timeseries (trend + distribution by model/credential)
 export async function getTimeseries(
   from: number,
   to: number,
@@ -56,7 +62,7 @@ export async function getTimeseries(
   return data
 }
 
-// 设置凭据禁用状态
+// Set the credential disabled state
 export async function setCredentialDisabled(
   id: number,
   disabled: boolean
@@ -68,7 +74,7 @@ export async function setCredentialDisabled(
   return data
 }
 
-// 设置凭据优先级
+// Set credential priority
 export async function setCredentialPriority(
   id: number,
   priority: number
@@ -80,7 +86,7 @@ export async function setCredentialPriority(
   return data
 }
 
-// 设置凭据备注名（传 null 或空字符串清除）
+// Set the credential display name (pass null or an empty string to clear)
 export async function setCredentialName(
   id: number,
   name: string | null
@@ -92,7 +98,7 @@ export async function setCredentialName(
   return data
 }
 
-// 重置失败计数
+// Reset the failure counter
 export async function resetCredentialFailure(
   id: number
 ): Promise<SuccessResponse> {
@@ -100,7 +106,7 @@ export async function resetCredentialFailure(
   return data
 }
 
-// 强制刷新 Token
+// Force refresh the token
 export async function forceRefreshToken(
   id: number
 ): Promise<SuccessResponse> {
@@ -108,13 +114,26 @@ export async function forceRefreshToken(
   return data
 }
 
-// 获取凭据余额
+// Get credential balance
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)
   return data
 }
 
-// 添加新凭据
+export async function getCredentialDetail(id: number): Promise<CredentialDetail> {
+  const { data } = await api.get<CredentialDetail>(`/credentials/${id}/detail`)
+  return data
+}
+
+export async function updateCredential(
+  id: number,
+  req: UpdateCredentialRequest
+): Promise<SuccessResponse> {
+  const { data } = await api.put<SuccessResponse>(`/credentials/${id}/detail`, req)
+  return data
+}
+
+// Add a new credential
 export async function addCredential(
   req: AddCredentialRequest
 ): Promise<AddCredentialResponse> {
@@ -122,34 +141,65 @@ export async function addCredential(
   return data
 }
 
-// 删除凭据
+// Delete a credential
 export async function deleteCredential(id: number): Promise<SuccessResponse> {
   const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`)
   return data
 }
 
-// 负载均衡模式
+// Export all credentials (includes secrets — for backup/migration)
+// Default shape is the KAM / ZyphrZero compatible envelope.
+export async function exportCredentials(): Promise<CredentialsExportFile> {
+  const { data } = await api.get<CredentialsExportFile>('/credentials/export')
+  return data
+}
+
+// Legacy flat array export (`credentials.json` compatible)
+export async function exportCredentialsFlat(): Promise<CredentialExportItem[]> {
+  const { data } = await api.get<CredentialExportItem[]>('/credentials/export', {
+    params: { format: 'flat' },
+  })
+  return data
+}
+
+// Batch import credentials (backup restore/migration; duplicates are skipped)
+export async function importCredentials(
+  credentials: CredentialExportItem[]
+): Promise<ImportCredentialsResponse> {
+  const { data } = await api.post<ImportCredentialsResponse>('/credentials/import', {
+    credentials,
+  })
+  return data
+}
+
+// Load balancing mode
 export type LoadBalancingMode = 'priority' | 'balanced' | 'round-robin'
 
-// 获取负载均衡模式
+// Get the load balancing mode
 export async function getLoadBalancingMode(): Promise<{ mode: LoadBalancingMode }> {
   const { data } = await api.get<{ mode: LoadBalancingMode }>('/config/load-balancing')
   return data
 }
 
-// 设置负载均衡模式
+// Set the load balancing mode
 export async function setLoadBalancingMode(mode: LoadBalancingMode): Promise<{ mode: LoadBalancingMode }> {
   const { data } = await api.put<{ mode: LoadBalancingMode }>('/config/load-balancing', { mode })
   return data
 }
 
-// 获取应用配置（页面可编辑子集）
+// Get the app config (page-editable subset)
 export async function getAppConfig(): Promise<AppConfig> {
   const { data } = await api.get<AppConfig>('/config/app')
   return data
 }
 
-// 更新应用配置（回写文件并热生效）
+// Get available models from credentials
+export async function getAvailableModels(): Promise<AvailableModelsResponse> {
+  const { data } = await api.get<AvailableModelsResponse>('/config/available-models')
+  return data
+}
+
+// Update the app config (written back to the file and applied live)
 export async function updateAppConfig(req: UpdateAppConfigRequest): Promise<AppConfig> {
   const { data } = await api.put<AppConfig>('/config/app', req)
   return data

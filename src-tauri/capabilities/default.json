@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "kiro-rs 桌面版默认权限：核心窗口与托盘操作",
+  "description": "kiro-rs desktop default permissions: core window and tray operations",
   "windows": ["main"],
   "remote": {
     "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]

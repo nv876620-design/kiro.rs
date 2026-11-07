@@ -1,8 +1,9 @@
-// 桌面壳（Tauri）集成。
+// Desktop shell (Tauri) integration.
 //
-// 通过 tauri.conf.json 的 withGlobalTauri，桌面壳会在页面注入 window.__TAURI__。
-// 纯 Web 部署下该对象不存在，isDesktop() 返回 false，相关 UI 自动隐藏，
-// 因此这里不引入 @tauri-apps/api npm 依赖，保持 Web 构建零影响。
+// With withGlobalTauri in tauri.conf.json, the desktop shell injects window.__TAURI__ into the page.
+// In a plain Web deployment that object doesn't exist, isDesktop() returns false and the related UI
+// is hidden automatically, so we don't add the @tauri-apps/api npm dependency and keep Web builds
+// completely unaffected.
 
 interface TauriGlobal {
   core: {
@@ -15,24 +16,25 @@ function tauri(): TauriGlobal | null {
   return g.__TAURI__ ?? null
 }
 
-/** 当前是否运行在桌面壳（Tauri）中。 */
+/** Whether we're currently running inside the desktop shell (Tauri). */
 export function isDesktop(): boolean {
   return tauri() !== null
 }
 
 export interface DesktopSettings {
-  /** 静默启动：开机自启时不弹窗，仅驻留托盘 */
+  /** Silent start: no window on autostart, stay resident in the tray only */
   silentStart: boolean
-  /** 开机启动是否已在系统注册 */
+  /** Whether autostart is registered with the system */
   autostart: boolean
-  /** 自动轻量模式：关窗后延迟销毁 WebView 释放内存 */
+  /** Auto lightweight mode: destroy the WebView after closing the window to free memory */
   autoLightweight: boolean
-  /** 进入轻量模式的延迟（分钟，0 表示关窗立即销毁） */
+  /** Delay before entering lightweight mode (minutes; 0 destroys immediately on window close) */
   lightweightMinutes: number
 }
 
-// Tauri invoke 失败时 reject 的通常是字符串（命令返回的 Err(String)）或错误对象，
-// 而非 axios 风格的 { response }。这里统一转成带前缀的 Error，避免上层兜底成「未知错误」。
+// When a Tauri invoke fails it normally rejects with a string (an Err(String) from the command) or an
+// error object, rather than the axios-style { response }. Normalize to a prefixed Error so callers
+// don't end up falling back to "Unknown error".
 function toError(e: unknown, cmd: string): Error {
   if (e instanceof Error) return e
   if (typeof e === 'string') return new Error(e)
@@ -43,7 +45,7 @@ function toError(e: unknown, cmd: string): Error {
   }
 }
 
-/** 读取桌面设置；非桌面环境返回 null。 */
+/** Read desktop settings; returns null outside the desktop shell. */
 export async function getDesktopSettings(): Promise<DesktopSettings | null> {
   const t = tauri()
   if (!t) return null
@@ -54,7 +56,7 @@ export async function getDesktopSettings(): Promise<DesktopSettings | null> {
   }
 }
 
-/** 写入桌面设置；非桌面环境为 no-op。 */
+/** Write desktop settings; no-op outside the desktop shell. */
 export async function setDesktopSettings(settings: DesktopSettings): Promise<void> {
   const t = tauri()
   if (!t) return
@@ -71,15 +73,15 @@ export async function setDesktopSettings(settings: DesktopSettings): Promise<voi
 }
 
 export interface PortStatus {
-  /** 配置中期望的端口 */
+  /** Port expected by the config */
   configured: number
-  /** 实际监听端口（可能因冲突回退为随机端口） */
+  /** Actual listening port (may fall back to a random port on conflict) */
   actual: number
-  /** 是否发生端口冲突 */
+  /** Whether a port conflict occurred */
   conflicted: boolean
 }
 
-/** 读取端口状态；非桌面环境返回 null。 */
+/** Read port status; returns null outside the desktop shell. */
 export async function getPortStatus(): Promise<PortStatus | null> {
   const t = tauri()
   if (!t) return null
@@ -90,7 +92,7 @@ export async function getPortStatus(): Promise<PortStatus | null> {
   }
 }
 
-/** 探测端口当前是否空闲；非桌面环境返回 true（不拦截）。 */
+/** Check whether a port is currently free; returns true outside the desktop shell (no blocking). */
 export async function checkPortAvailable(port: number): Promise<boolean> {
   const t = tauri()
   if (!t) return true
@@ -101,7 +103,7 @@ export async function checkPortAvailable(port: number): Promise<boolean> {
   }
 }
 
-/** 修改期望端口并写回配置（需重启生效）；非桌面环境为 no-op。 */
+/** Change the configured port and write it back to the config (takes effect after restart); no-op outside the desktop shell. */
 export async function setConfiguredPort(port: number): Promise<void> {
   const t = tauri()
   if (!t) return
@@ -125,7 +127,7 @@ export interface LogPull {
   lines: LogLine[]
 }
 
-/** 拉取序号 > after 的新日志行；非桌面环境返回 null。 */
+/** Pull new log lines with seq > after; returns null outside the desktop shell. */
 export async function getLogs(after: number): Promise<LogPull | null> {
   const t = tauri()
   if (!t) return null
@@ -136,7 +138,7 @@ export async function getLogs(after: number): Promise<LogPull | null> {
   }
 }
 
-/** 开启/关闭日志捕获；非桌面环境为 no-op。 */
+/** Enable/disable log capture; no-op outside the desktop shell. */
 export async function setLogCapture(enabled: boolean): Promise<void> {
   const t = tauri()
   if (!t) return
@@ -147,7 +149,7 @@ export async function setLogCapture(enabled: boolean): Promise<void> {
   }
 }
 
-/** 清空日志缓冲；非桌面环境为 no-op。 */
+/** Clear the log buffer; no-op outside the desktop shell. */
 export async function clearLogs(): Promise<void> {
   const t = tauri()
   if (!t) return
@@ -159,13 +161,13 @@ export async function clearLogs(): Promise<void> {
 }
 
 export interface ImportConfigResult {
-  /** 用户是否取消了文件选择 */
+  /** Whether the user cancelled the file picker */
   cancelled: boolean
-  /** 导入成功后配置声明的端口 */
+  /** Port declared by the config after a successful import */
   port: number
 }
 
-/** 弹系统文件选择器导入完整 config.json（整体覆盖，重启生效）；非桌面环境返回 null。 */
+/** Open the system file picker to import a full config.json (full overwrite, takes effect after restart); returns null outside the desktop shell. */
 export async function importConfig(): Promise<ImportConfigResult | null> {
   const t = tauri()
   if (!t) return null
@@ -185,7 +187,7 @@ export interface SsoCredentialCandidate {
   sourceFile: string
 }
 
-/** 扫描本机 AWS SSO 缓存，返回可导入的凭证候选；非桌面环境返回 []。 */
+/** Scan the local AWS SSO cache and return importable credential candidates; returns [] outside the desktop shell. */
 export async function scanSsoCredentials(): Promise<SsoCredentialCandidate[]> {
   const t = tauri()
   if (!t) return []
@@ -197,19 +199,19 @@ export async function scanSsoCredentials(): Promise<SsoCredentialCandidate[]> {
 }
 
 export interface UpdateInfo {
-  /** 是否有新版本 */
+  /** Whether a new version is available */
   hasUpdate: boolean
-  /** 当前版本 */
+  /** Current version */
   currentVersion: string
-  /** 最新版本 */
+  /** Latest version */
   latestVersion: string
-  /** release 页面 URL */
+  /** Release page URL */
   releaseUrl: string
-  /** release 说明 */
+  /** Release notes */
   notes: string
 }
 
-/** 检查 GitHub 是否有新版本；非桌面环境返回 null。 */
+/** Check GitHub for a new version; returns null outside the desktop shell. */
 export async function checkUpdate(): Promise<UpdateInfo | null> {
   const t = tauri()
   if (!t) return null
@@ -220,7 +222,7 @@ export async function checkUpdate(): Promise<UpdateInfo | null> {
   }
 }
 
-/** 读取桌面壳版本号（编译时嵌入，不依赖网络）；非桌面环境返回 null。 */
+/** Read the desktop shell version (embedded at compile time, no network needed); returns null outside the desktop shell. */
 export async function getAppVersion(): Promise<string | null> {
   const t = tauri()
   if (!t) return null
@@ -231,7 +233,7 @@ export async function getAppVersion(): Promise<string | null> {
   }
 }
 
-/** 用系统浏览器打开外部链接；非桌面环境回退到 window.open。 */
+/** Open an external link in the system browser; falls back to window.open outside the desktop shell. */
 export async function openUrl(url: string): Promise<void> {
   const t = tauri()
   if (!t) {

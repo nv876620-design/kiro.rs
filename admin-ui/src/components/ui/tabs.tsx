@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 
-// 轻量受控 Tab（避免引入 @radix-ui/react-tabs 依赖）
+// Lightweight controlled Tabs (avoids pulling in the @radix-ui/react-tabs dependency)
 export interface TabItem {
   value: string
   label: string
@@ -12,7 +12,7 @@ interface TabNavProps {
   items: TabItem[]
   value: string
   onChange: (value: string) => void
-  /// 'vertical' 竖向侧边导航；'horizontal' 顶部横向
+  /// 'vertical' side navigation; 'horizontal' top bar
   orientation?: 'vertical' | 'horizontal'
   className?: string
 }

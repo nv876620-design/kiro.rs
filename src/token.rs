@@ -265,3 +265,47 @@ pub(crate) fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
 
     total.max(1)
 }
+
+/// Derive true input tokens from a context-total that already includes this
+/// turn's output (upstream `contextUsageEvent` arrives at end of stream and
+/// covers whole context *after* generation: system prompt + prompt + output).
+///
+/// - `context_total`: `contextUsagePercentage * window / 100`.
+/// - `fallback_input`: local prompt estimate used when no context event
+///   arrived (prompt-only, never contains output) - returned untouched.
+/// - `output_tokens`: this turn's output tokens.
+pub(crate) fn input_tokens_excluding_output(
+    context_total: Option<i32>,
+    fallback_input: i32,
+    output_tokens: i32,
+) -> i32 {
+    match context_total {
+        // Output estimate and context conversion use different yardsticks;
+        // clamp at 0 (not 1) - better to under-report than invent tokens.
+        Some(total) => total.max(0).saturating_sub(output_tokens.max(0)).max(0),
+        None => fallback_input.max(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_tokens_excluding_output_subtracts_output_from_context_total() {
+        assert_eq!(input_tokens_excluding_output(Some(8404), 25, 1514), 6890);
+    }
+
+    #[test]
+    fn input_tokens_excluding_output_keeps_fallback_untouched() {
+        assert_eq!(input_tokens_excluding_output(None, 25, 1514), 25);
+        assert_eq!(input_tokens_excluding_output(None, -3, 10), 0);
+    }
+
+    #[test]
+    fn input_tokens_excluding_output_clamps_when_output_exceeds_total() {
+        assert_eq!(input_tokens_excluding_output(Some(10), 25, 999), 0);
+        assert_eq!(input_tokens_excluding_output(Some(10), 25, -5), 10);
+        assert_eq!(input_tokens_excluding_output(Some(-7), 25, 0), 0);
+    }
+}

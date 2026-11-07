@@ -676,9 +676,14 @@ impl KiroProvider {
                 continue;
             }
 
-            // 400 Bad Request - 请求问题，重试/切换凭据无意义
+            // 400 Bad Request - 请求问题，重试/切换凭据无意义。
+            // 保留为 typed UpstreamApiError，让上层可按 reason（如 INVALID_MODEL_ID）区分处理。
             if status.as_u16() == 400 {
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+                return Err(anyhow::Error::new(UpstreamApiError {
+                    status: 400,
+                    message: format!("{} API 请求失败: {} {}", api_type, status, body),
+                    retry_after: None,
+                }));
             }
 
             // 401/403 - 更可能是凭据/权限问题：计入失败并允许故障转移
@@ -733,7 +738,37 @@ impl KiroProvider {
 
             // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
             // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
+            // 例外：账号级限流（account rate limit）应故障转移到其他凭据
+            // (upstream feat: route account rate limits through failover)。
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                let account_limited = status.as_u16() == 429
+                    && kiro_endpoint
+                        .as_ref()
+                        .is_some_and(|e| e.is_account_rate_limited(&body));
+                if account_limited {
+                    tracing::warn!(
+                        "API 请求失败（账号级限流，切换凭据，尝试 {}/{}）: {} {}",
+                        attempt + 1,
+                        max_retries,
+                        status,
+                        body
+                    );
+                    let has_available = self.token_manager.report_failure(ctx.id);
+                    if !has_available {
+                        anyhow::bail!(
+                            "{} API 请求失败（所有凭据已用尽）: {} {}",
+                            api_type,
+                            status,
+                            body
+                        );
+                    }
+                    last_error = Some(anyhow::Error::new(UpstreamApiError {
+                        status: status.as_u16(),
+                        message: format!("{} API 请求失败: {} {}", api_type, status, body),
+                        retry_after,
+                    }));
+                    continue;
+                }
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -764,7 +799,11 @@ impl KiroProvider {
 
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
             if status.is_client_error() {
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+                return Err(anyhow::Error::new(UpstreamApiError {
+                    status: status.as_u16(),
+                    message: format!("{} API 请求失败: {} {}", api_type, status, body),
+                    retry_after: None,
+                }));
             }
 
             // 兜底：当作可重试的瞬态错误处理（不切换凭据）

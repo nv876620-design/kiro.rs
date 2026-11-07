@@ -54,6 +54,11 @@ pub trait KiroEndpoint: Send + Sync {
     fn is_bearer_token_invalid(&self, body: &str) -> bool {
         default_is_bearer_token_invalid(body)
     }
+
+    /// 判断响应体是否表示"账号级限流"（应故障转移到其他凭据）
+    fn is_account_rate_limited(&self, body: &str) -> bool {
+        default_is_account_rate_limited(body)
+    }
 }
 
 /// 装饰请求时可用的上下文
@@ -101,6 +106,41 @@ pub fn default_is_bearer_token_invalid(body: &str) -> bool {
     body.contains("The bearer token included in the request is invalid")
 }
 
+/// Detect account-level rate limiting (should fail over to another credential).
+///
+/// Matches upstream reasons `USER_REQUEST_RATE_EXCEEDED`,
+/// `CREDIT_CONSUMPTION_RATE_EXCEEDED`, `SERVICE_REQUEST_RATE_EXCEEDED`,
+/// plus common message patterns. Explicitly excludes model-capacity signals
+/// (`INSUFFICIENT_MODEL_CAPACITY`, `MODEL_TEMPORARILY_UNAVAILABLE`) which are
+/// not account limits (upstream feat: route account rate limits through failover).
+pub fn default_is_account_rate_limited(body: &str) -> bool {
+    if body.contains("INSUFFICIENT_MODEL_CAPACITY")
+        || body.contains("MODEL_TEMPORARILY_UNAVAILABLE")
+    {
+        return false;
+    }
+    for marker in [
+        "USER_REQUEST_RATE_EXCEEDED",
+        "CREDIT_CONSUMPTION_RATE_EXCEEDED",
+        "SERVICE_REQUEST_RATE_EXCEEDED",
+    ] {
+        if body.contains(marker) {
+            return true;
+        }
+    }
+    let lower = body.to_lowercase();
+    if lower.contains("suspicious activity") && lower.contains("temporary limits") {
+        return true;
+    }
+    if lower.contains("5-minute credit limit exceeded") {
+        return true;
+    }
+    if lower.contains("too many requests") && lower.contains("please wait") {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +169,30 @@ mod tests {
             "The bearer token included in the request is invalid"
         ));
         assert!(!default_is_bearer_token_invalid("unrelated error"));
+    }
+
+    #[test]
+    fn test_default_account_rate_limited_reasons() {
+        for body in [
+            r#"{"reason":"USER_REQUEST_RATE_EXCEEDED"}"#,
+            r#"{"reason":"CREDIT_CONSUMPTION_RATE_EXCEEDED"}"#,
+            r#"{"reason":"SERVICE_REQUEST_RATE_EXCEEDED"}"#,
+            "suspicious activity detected, temporary limits applied",
+            "5-minute credit limit exceeded, slow down",
+            "Too many requests, please wait and retry",
+        ] {
+            assert!(default_is_account_rate_limited(body), "body: {}", body);
+        }
+    }
+
+    #[test]
+    fn test_default_account_rate_limited_excludes_capacity() {
+        for body in [
+            r#"{"reason":"INSUFFICIENT_MODEL_CAPACITY"}"#,
+            "MODEL_TEMPORARILY_UNAVAILABLE, try again later",
+            r#"{"message":"plain 429 high traffic"}"#,
+        ] {
+            assert!(!default_is_account_rate_limited(body), "body: {}", body);
+        }
     }
 }

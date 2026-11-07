@@ -37,9 +37,11 @@ sha2 = "0.10"
 hex = "0.4"
 crc = "3"           # CRC32C 计算
 bytes = "1"         # 高效的字节缓冲区
+ciborium = "0.2"
 tower-http = { version = "0.6", features = ["cors"] }
 clap = { version = "4.5", features = ["derive"] }
 urlencoding = "2"
+serde_urlencoded = "0.7"
 parking_lot = "0.12"  # 高性能同步原语
 rusqlite = { version = "0.32", features = ["bundled"] }  # 监控时间序列存储（静态编译）
 subtle = "2.6"        # 常量时间比较（防止时序攻击）

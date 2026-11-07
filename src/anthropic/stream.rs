@@ -729,12 +729,18 @@ impl StreamContext {
     }
 
     fn effective_input_tokens(&self) -> i32 {
-        // 优先级：metadataEvent 的精确值 > contextUsageEvent 反推值 > 本地估算
-        self.token_usage
-            .as_ref()
-            .and_then(|u| u.anthropic_input_tokens())
-            .or(self.context_input_tokens)
-            .unwrap_or(self.input_tokens)
+        // Priority: metadataEvent exact value > contextUsageEvent derived > local estimate.
+        // contextUsageEvent covers post-generation whole context (includes this
+        // turn's output), so subtract output to avoid double-counting
+        // (upstream fix: input_tokens excluding output).
+        if let Some(exact) = self.token_usage.as_ref().and_then(|u| u.anthropic_input_tokens()) {
+            return exact;
+        }
+        crate::token::input_tokens_excluding_output(
+            self.context_input_tokens,
+            self.input_tokens,
+            self.effective_output_tokens(),
+        )
     }
 
     /// 最终上报的输出 tokens：优先用 metadataEvent 精确值，否则用累计估算

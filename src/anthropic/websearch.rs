@@ -578,6 +578,7 @@ pub async fn handle_websearch_request(
             .header(header::CONTENT_TYPE, "text/event-stream")
             .header(header::CACHE_CONTROL, "no-cache")
             .header(header::CONNECTION, "keep-alive")
+            .header("x-accel-buffering", "no")
             .body(Body::from_stream(stream))
             .unwrap()
             .into_response()

@@ -12,6 +12,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,7 +24,7 @@ use crate::kiro::model::credentials::{Capability, KiroCredentials};
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
-use crate::kiro::model::usage_limits::UsageLimitsResponse;
+use crate::kiro::model::usage_limits::{UsageLimitsResponse, UserInfo};
 use crate::model::config::Config;
 
 /// 检查 Token 是否在指定时间内过期
@@ -353,56 +354,105 @@ async fn refresh_idc_token(
     Ok(new_credentials)
 }
 
-/// 获取使用额度信息
+/// Fetch usage limits using the same REST-first strategy as Kiro-account-manager.
 pub(crate) async fn get_usage_limits(
     credentials: &KiroCredentials,
     config: &Config,
     token: &str,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<UsageLimitsResponse> {
-    tracing::debug!("正在获取使用额度信息...");
+    let requested_region = credentials.effective_api_region(config);
+    let primary_region = if requested_region.starts_with("eu-") {
+        "eu-central-1"
+    } else {
+        "us-east-1"
+    };
+    let fallback_region = if primary_region == "eu-central-1" {
+        "us-east-1"
+    } else {
+        "eu-central-1"
+    };
 
-    // 优先级：凭据.api_region > config.api_region > config.region
-    let region = credentials.effective_api_region(config);
+    let has_profile_arn = credentials
+        .profile_arn
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+
+    // 优先不带 profileArn 查询（与 Kiro-account-manager 一致），若被拒绝再尝试带 profileArn
+    let profile_arn_attempts = if has_profile_arn {
+        vec![false, true]
+    } else {
+        vec![false]
+    };
+
+    let mut last_error = String::new();
+    for region in [primary_region, fallback_region] {
+        for &with_profile_arn in &profile_arn_attempts {
+            match get_usage_limits_rest(credentials, config, token, proxy, region, with_profile_arn).await {
+                Ok(data) => return Ok(data),
+                Err(error) => {
+                    let message = error.to_string();
+                    tracing::debug!(
+                        "REST usage query (region={}, with_profile_arn={}) rejected: {}",
+                        region,
+                        with_profile_arn,
+                        message
+                    );
+                    last_error = message;
+                }
+            }
+        }
+    }
+
+    bail!("Usage check failed: {}", last_error)
+}
+
+async fn get_usage_limits_rest(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+    region: &str,
+    include_profile_arn: bool,
+) -> anyhow::Result<UsageLimitsResponse> {
     let host = format!("q.{}.amazonaws.com", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config);
     let kiro_version = &config.kiro_version;
-    let os_name = &config.system_version;
-    let node_version = &config.node_version;
 
-    // 构建 URL
     let mut url = format!(
-        "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST",
+        "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true",
         host
     );
 
-    // profileArn 是可选的
-    if let Some(profile_arn) = &credentials.profile_arn {
-        url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+    if include_profile_arn {
+        if let Some(ref profile_arn) = credentials.profile_arn {
+            let trimmed = profile_arn.trim();
+            if !trimmed.is_empty() {
+                url.push_str("&profileArn=");
+                url.push_str(&urlencoding::encode(trimmed));
+            }
+        }
     }
 
-    // 构建 User-Agent headers
-    let runtime_ver = config.effective_runtime_sdk_version();
     let user_agent = format!(
-        "aws-sdk-js/{} ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#{} m/N,E KiroIDE-{}-{}",
-        runtime_ver, os_name, node_version, runtime_ver, kiro_version, machine_id
+        "aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-{}-{}",
+        kiro_version, machine_id
     );
     let amz_user_agent = format!(
-        "aws-sdk-js/{} KiroIDE-{}-{}",
-        runtime_ver, kiro_version, machine_id
+        "aws-sdk-js/1.0.18 KiroIDE {} {}",
+        kiro_version, machine_id
     );
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
     let mut request = client
         .get(&url)
-        .header("x-amz-user-agent", &amz_user_agent)
-        .header("user-agent", &user_agent)
-        .header("host", &host)
-        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
-        .header("amz-sdk-request", "attempt=1; max=1")
+        .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {}", token))
-        .header("Connection", "close");
+        .header("User-Agent", &user_agent)
+        .header("x-amz-user-agent", &amz_user_agent)
+        .header("x-amzn-codewhisperer-optout", "true");
 
     if credentials.is_api_key_credential() {
         request = request.header("TokenType", "API_KEY");
@@ -414,17 +464,75 @@ pub(crate) async fn get_usage_limits(
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
         let error_msg = match status.as_u16() {
-            401 => "认证失败，Token 无效或已过期",
-            403 => "权限不足，无法获取使用额度",
-            429 => "请求过于频繁，已被限流",
-            500..=599 => "服务器错误，AWS 服务暂时不可用",
-            _ => "获取使用额度失败",
+            401 => "Authentication failed: token is invalid or expired",
+            403 => "Permission denied: usage is unavailable for this credential",
+            429 => "Request rate limited",
+            500..=599 => "Server error: AWS service is temporarily unavailable",
+            _ => "Usage check failed",
         };
-        bail!("{}: {} {}", error_msg, status, body_text);
+        bail!("{}: HTTP {}: {}", error_msg, status, body_text);
     }
 
     let data: UsageLimitsResponse = response.json().await?;
     Ok(data)
+}
+
+#[derive(Debug, Serialize)]
+struct CborUserInfoRequest {
+    origin: &'static str,
+}
+
+async fn get_user_info_cbor(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<UserInfo> {
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
+    let runtime_ver = config.effective_runtime_sdk_version();
+    let kiro_version = &config.kiro_version;
+    let user_agent = format!(
+        "aws-sdk-js/{} ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#{} m/E KiroIDE-{}-{}",
+        runtime_ver,
+        config.system_version,
+        config.node_version,
+        runtime_ver,
+        kiro_version,
+        machine_id
+    );
+    let amz_user_agent = format!("aws-sdk-js/{} KiroIDE {} {}", runtime_ver, kiro_version, machine_id);
+    let body = CborUserInfoRequest {
+        origin: "KIRO_IDE",
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&body, &mut encoded)?;
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let response = client
+        .post("https://app.kiro.dev/service/KiroWebPortalService/operation/GetUserInfo")
+        .header("accept", "application/cbor")
+        .header("content-type", "application/cbor")
+        .header("smithy-protocol", "rpc-v2-cbor")
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=1")
+        .header("x-amz-user-agent", amz_user_agent)
+        .header("user-agent", user_agent)
+        .header("authorization", format!("Bearer {token}"))
+        .header("cookie", format!("Idp=BuilderId; AccessToken={token}"))
+        .header("Connection", "close")
+        .body(encoded)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&bytes);
+        anyhow::bail!("CBOR user info query failed: {} {}", status, detail);
+    }
+
+    ciborium::de::from_reader(Cursor::new(bytes))
+        .map_err(|error| anyhow::anyhow!("CBOR user info response decode failed: {error}"))
 }
 
 /// ListAvailableProfiles 接口返回的单个 Profile
@@ -1100,12 +1208,14 @@ impl MultiTokenManager {
 
         match mode {
             "balanced" => {
-                // Least-Used 策略：选择成功次数最少的凭据
-                // 平局时按优先级排序（数字越小优先级越高）
-                let entry = available
-                    .iter()
-                    .min_by_key(|e| (e.success_count, e.credentials.priority))?;
-
+                // Uniform random among available credentials (upstream fix:
+                // balanced sticky-miss random pick). Least-used by cumulative
+                // success_count lets a new credential (count 0) monopolize
+                // traffic until it catches up, and biases toward old entries.
+                // Session stickiness is handled by the caller; a miss here
+                // (first turn / bound credential unavailable) picks randomly.
+                let idx = fastrand::usize(..available.len());
+                let entry = available[idx];
                 Some((entry.id, entry.credentials.clone()))
             }
             "round-robin" => {
@@ -1470,7 +1580,7 @@ impl MultiTokenManager {
     /// # Arguments
     /// * `id` - 凭据 ID，用于更新正确的条目
     /// * `credentials` - 凭据信息
-    async fn try_ensure_token(
+    pub(crate) async fn try_ensure_token(
         &self,
         id: u64,
         credentials: &KiroCredentials,
@@ -2242,6 +2352,106 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// Return the stored credential for the authenticated admin API.
+    pub fn get_credential_for_admin(&self, id: u64) -> anyhow::Result<KiroCredentials> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+        let mut credentials = entry.credentials.clone();
+        credentials.id = Some(id);
+        credentials.disabled = entry.disabled;
+        Ok(credentials)
+    }
+
+    /// Replace an existing credential while preserving its stable id and
+    /// runtime statistics. OAuth credentials are refreshed once to validate
+    /// the new secret before replacing the live entry.
+    pub async fn update_credential(
+        &self,
+        id: u64,
+        mut new_cred: KiroCredentials,
+    ) -> anyhow::Result<()> {
+        let existing = self.get_credential_for_admin(id)?;
+        new_cred.id = Some(id);
+        new_cred.canonicalize_auth_method();
+
+        if !new_cred.is_passthrough() && !new_cred.is_api_key_credential() {
+            validate_refresh_token(&new_cred)?;
+        }
+
+        let mut validated = if new_cred.is_passthrough() || new_cred.is_api_key_credential() {
+            new_cred.clone()
+        } else {
+            let proxy = new_cred.effective_proxy(self.proxy.as_ref());
+            refresh_token(&new_cred, &self.config(), proxy.as_ref()).await?
+        };
+
+        if !new_cred.is_passthrough() {
+            let duplicate_hash = new_cred
+                .refresh_token
+                .as_deref()
+                .map(sha256_hex);
+            if let Some(hash) = duplicate_hash {
+                let entries = self.entries.lock();
+                if entries.iter().any(|entry| {
+                    entry.id != id
+                        && entry
+                            .credentials
+                            .refresh_token
+                            .as_deref()
+                            .map(sha256_hex)
+                            .as_deref()
+                            == Some(hash.as_str())
+                }) {
+                    anyhow::bail!("凭据已存在（refreshToken 重复）");
+                }
+            }
+        }
+
+        validated.id = Some(id);
+        validated.name = new_cred.name;
+        validated.priority = new_cred.priority;
+        validated.auth_method = new_cred.auth_method;
+        validated.client_id = new_cred.client_id;
+        validated.client_secret = new_cred.client_secret;
+        validated.region = new_cred.region;
+        validated.auth_region = new_cred.auth_region;
+        validated.api_region = new_cred.api_region;
+        validated.machine_id = new_cred.machine_id;
+        validated.email = new_cred.email;
+        validated.proxy_url = new_cred.proxy_url;
+        validated.proxy_username = new_cred.proxy_username;
+        validated.proxy_password = new_cred.proxy_password;
+        validated.kiro_api_key = new_cred.kiro_api_key;
+        validated.endpoint = new_cred.endpoint;
+        validated.kind = new_cred.kind;
+        validated.base_url = new_cred.base_url;
+        validated.upstream_api_key = new_cred.upstream_api_key;
+        validated.disabled = existing.disabled;
+        validated.profile_arn = match &new_cred.profile_arn {
+            Some(arn) if !arn.trim().is_empty() => Some(arn.clone()),
+            _ if existing.refresh_token == validated.refresh_token => existing.profile_arn.clone(),
+            _ => None,
+        };
+
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials = validated;
+            entry.disabled = existing.disabled;
+            entry.failure_count = 0;
+            entry.refresh_failure_count = 0;
+            entry.disabled_reason = None;
+        }
+        self.persist_credentials()?;
+        Ok(())
+    }
+
     /// 重置凭据失败计数并重新启用（Admin API）
     pub fn reset_and_enable(&self, id: u64) -> anyhow::Result<()> {
         {
@@ -2291,76 +2501,73 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        // API Key 凭据直接使用 kiro_api_key，无需刷新
-        let token = if credentials.is_api_key_credential() {
-            credentials
-                .kiro_api_key
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
-        } else {
-            // 检查是否需要刷新 token
-            let needs_refresh =
-                is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
+        let context = self.try_ensure_token(id, &credentials).await?;
+        let token = context.token;
+        let credentials = context.credentials;
+        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
 
-            if needs_refresh {
-                let refresh_lock = self.refresh_lock_for(id);
-                let _guard = refresh_lock.lock().await;
-                let current_creds = {
-                    let entries = self.entries.lock();
-                    entries
-                        .iter()
-                        .find(|e| e.id == id)
-                        .map(|e| e.credentials.clone())
-                        .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        // GetUserInfo is non-fatal; it lets IdC/social credentials persist the
+        // email even when the usage endpoint rejects the account.
+        let user_info = get_user_info_cbor(&credentials, &self.config(), &token, effective_proxy.as_ref())
+            .await
+            .ok();
+        if let Some(ref user_info) = user_info {
+            if let Some(email) = user_info
+                .email
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|email| !email.is_empty())
+            {
+                let changed = {
+                    let mut entries = self.entries.lock();
+                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                        let old_email = entry.credentials.email.clone();
+                        if old_email != Some(email.clone()) {
+                            entry.credentials.email = Some(email);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 };
 
-                if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                    let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
-                    let new_creds =
-                        refresh_token(&current_creds, &self.config(), effective_proxy.as_ref())
-                            .await?;
-                    {
-                        let mut entries = self.entries.lock();
-                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            entry.credentials = new_creds.clone();
-                        }
-                    }
-                    // 持久化失败只记录警告，不影响本次请求
+                if changed {
                     if let Err(e) = self.persist_credentials() {
-                        tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
+                        tracing::warn!("Email update persistence failed (does not affect this request): {}", e);
                     }
-                    new_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
-                } else {
-                    current_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
                 }
-            } else {
-                credentials
-                    .access_token
-                    .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
             }
-        };
+        }
 
-        let credentials = {
-            let entries = self.entries.lock();
-            entries
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.credentials.clone())
-                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-        };
-
-        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
-        let usage_limits = get_usage_limits(
+        let usage_limits = match get_usage_limits(
             &credentials,
             &self.config(),
             &token,
             effective_proxy.as_ref(),
         )
-        .await?;
+        .await
+        {
+            Ok(limits) => limits,
+            Err(e) if credentials.is_idc() && (e.to_string().contains("Invalid profileArn") || e.to_string().contains("403")) => {
+                tracing::info!(
+                    "凭据 #{} (is_idc={}) 查询使用额度返回: {}，回退为 IdC / Enterprise 免限额响应",
+                    id,
+                    credentials.is_idc(),
+                    e
+                );
+                UsageLimitsResponse {
+                    next_date_reset: None,
+                    subscription_info: Some(crate::kiro::model::usage_limits::SubscriptionInfo {
+                        subscription_title: Some("IdC / Enterprise".to_string()),
+                    }),
+                    usage_breakdown_list: vec![],
+                    user_info: user_info.clone(),
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         // 更新订阅等级到凭据（仅在发生变化时持久化）
         if let Some(subscription_title) = usage_limits.subscription_title() {
@@ -2388,6 +2595,42 @@ impl MultiTokenManager {
             if changed {
                 if let Err(e) = self.persist_credentials() {
                     tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
+                }
+            }
+        }
+
+        // 同步 getUsageLimits 返回的账号邮箱到凭据（仅在发生变化时持久化）
+        if let Some(email) = usage_limits
+            .user_info
+            .as_ref()
+            .and_then(|u| u.email.as_deref())
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
+            let changed = {
+                let mut entries = self.entries.lock();
+                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                    let old_email = entry.credentials.email.clone();
+                    if old_email.as_deref().map(str::trim) != Some(email) {
+                        entry.credentials.email = Some(email.to_string());
+                        tracing::info!(
+                            "凭据 #{} 邮箱已更新: {:?} -> {}",
+                            id,
+                            old_email,
+                            email
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if changed {
+                if let Err(e) = self.persist_credentials() {
+                    tracing::warn!("邮箱更新后持久化失败（不影响本次请求）: {}", e);
                 }
             }
         }
@@ -2816,6 +3059,83 @@ impl MultiTokenManager {
 
         tracing::info!("负载均衡模式已设置为: {}", mode);
         Ok(())
+    }
+
+    /// 获取所有 credentials 列表（用于 Admin API）
+    pub fn get_all_credentials(&self) -> Vec<KiroCredentials> {
+        let entries = self.entries.lock();
+        entries.iter().map(|e| e.credentials.clone()).collect()
+    }
+
+    /// Whether monthly-quota auto-recovery is enabled (config toggle).
+    pub fn quota_reset_recovery_enabled(&self) -> bool {
+        self.config().quota_reset_recovery_enabled
+    }
+
+    /// Enable/disable monthly-quota auto-recovery and persist to config file.
+    pub fn set_quota_reset_recovery_enabled(&self, enabled: bool) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let config_path = self
+            .config()
+            .config_path()
+            .map(|p| p.to_path_buf());
+        let Some(config_path) = config_path else {
+            let mut cfg = (*self.config()).clone();
+            cfg.quota_reset_recovery_enabled = enabled;
+            self.replace_config(cfg);
+            return Ok(());
+        };
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("Failed to reload config: {}", config_path.display()))?;
+        config.quota_reset_recovery_enabled = enabled;
+        config
+            .save()
+            .with_context(|| format!("Failed to persist quota reset recovery flag: {}", config_path.display()))?;
+        self.replace_config(config);
+        tracing::info!("Quota reset recovery set to: {}", enabled);
+        Ok(())
+    }
+
+    /// Re-enable a credential disabled for quota exhaustion.
+    ///
+    /// Only transitions `QuotaExceeded -> enabled` (clears failure counters);
+    /// returns true when the credential was actually recovered
+    /// (upstream feat: quota reset recovery toggle).
+    pub fn recover_quota_exceeded(&self, id: u64) -> bool {
+        let result = {
+            let mut entries = self.entries.lock();
+            let entry = match entries.iter_mut().find(|e| e.id == id) {
+                Some(e) => e,
+                None => return false,
+            };
+            if !entry.disabled || entry.disabled_reason != Some(DisabledReason::QuotaExceeded) {
+                return false;
+            }
+            entry.disabled = false;
+            entry.disabled_reason = None;
+            entry.failure_count = 0;
+            entry.refresh_failure_count = 0;
+            tracing::info!("Credential #{} quota reset detected, re-enabled", id);
+            true
+        };
+        if result {
+            self.save_stats_debounced();
+            if let Err(e) = self.persist_credentials() {
+                tracing::warn!("Failed to persist recovered credential: {}", e);
+            }
+        }
+        result
+    }
+
+    /// 获取所有 credentials 条目元数据（包含 id、credentials 与 disabled 状态，用于 Admin API）
+    pub fn get_credentials_entries(&self) -> Vec<(u64, KiroCredentials, bool)> {
+        let entries = self.entries.lock();
+        entries.iter().map(|e| (e.id, e.credentials.clone(), e.disabled)).collect()
+    }
+
+    /// 获取全局代理配置
+    pub fn proxy(&self) -> Option<ProxyConfig> {
+        self.proxy.clone()
     }
 }
 

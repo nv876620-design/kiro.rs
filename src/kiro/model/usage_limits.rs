@@ -45,6 +45,10 @@ pub struct UsageLimitsResponse {
     /// 使用量明细列表
     #[serde(default)]
     pub usage_breakdown_list: Vec<UsageBreakdown>,
+
+    /// 用户信息（邮箱等）
+    #[serde(default)]
+    pub user_info: Option<UserInfo>,
 }
 
 /// 订阅信息
@@ -54,6 +58,19 @@ pub struct SubscriptionInfo {
     /// 订阅标题 (KIRO PRO+ / KIRO FREE 等)
     #[serde(default)]
     pub subscription_title: Option<String>,
+}
+
+/// 用户信息
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    /// 用户邮箱
+    #[serde(default)]
+    pub email: Option<String>,
+
+    /// 用户 ID
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// 使用量明细
@@ -88,6 +105,14 @@ pub struct UsageBreakdown {
     /// 使用限额（精确值）
     #[serde(default)]
     pub usage_limit_with_precision: f64,
+
+    /// 资源类型（CREDIT 等）
+    #[serde(default, alias = "type")]
+    pub resource_type: Option<String>,
+
+    /// 资源显示名称
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// 奖励额度
@@ -167,9 +192,18 @@ impl UsageLimitsResponse {
             .and_then(|info| info.subscription_title.as_deref())
     }
 
-    /// 获取第一个使用量明细
+    /// 获取使用量明细（优先 Credits，回退第一个）
     fn primary_breakdown(&self) -> Option<&UsageBreakdown> {
-        self.usage_breakdown_list.first()
+        self.usage_breakdown_list
+            .iter()
+            .find(|breakdown| {
+                breakdown.resource_type.as_deref() == Some("CREDIT")
+                    || breakdown
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Credits"))
+            })
+            .or_else(|| self.usage_breakdown_list.first())
     }
 
     /// 获取总使用限额（精确值）

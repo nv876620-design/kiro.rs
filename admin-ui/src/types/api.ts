@@ -1,4 +1,4 @@
-// 凭据状态响应
+// Credential status response
 export interface CredentialsStatusResponse {
   total: number
   available: number
@@ -6,7 +6,55 @@ export interface CredentialsStatusResponse {
   credentials: CredentialStatusItem[]
 }
 
-// 凭据级 RPM 各模型类别当前 60 秒窗口占用
+// One exported credential (full object including secrets, same shape as
+// credentials.json entries — can be fed back to the import endpoint)
+export type CredentialExportItem = Record<string, unknown>
+
+// KAM / ZyphrZero compatible export account
+export interface CredentialExportAccount {
+  id: string
+  email: string
+  nickname?: string
+  idp: string
+  machineId?: string
+  profileArn?: string
+  credentials: Record<string, unknown>
+  subscription?: unknown
+  usage?: unknown
+  tags?: string[]
+  status?: string
+  createdAt?: number
+  lastUsedAt?: number
+}
+
+// KAM / ZyphrZero compatible export envelope
+export interface CredentialsExportFile {
+  version: string
+  exportedAt: number
+  accounts: CredentialExportAccount[]
+  groups: unknown[]
+  tags: unknown[]
+}
+
+// Batch import (backup restore / migration)
+export interface ImportCredentialsRequest {
+  credentials: CredentialExportItem[]
+}
+
+export interface ImportFailedItem {
+  index: number
+  error: string
+}
+
+export interface ImportCredentialsResponse {
+  success: boolean
+  added: number
+  duplicates: number
+  failed: ImportFailedItem[]
+  credentialIds: number[]
+}
+
+// Per-credential current usage of the 60-second window for each model class
 export interface RpmWindowCounts {
   opus: number
   sonnet: number
@@ -14,7 +62,7 @@ export interface RpmWindowCounts {
   other: number
 }
 
-// 凭据级 RPM 实时状态：窗口占用 + 生效上限（0 表示不限制）
+// Per-credential real-time RPM status: window usage + effective limit (0 = unlimited)
 export interface RpmStatus {
   counts: RpmWindowCounts
   limitOpus: number
@@ -23,7 +71,7 @@ export interface RpmStatus {
   limitOther: number
 }
 
-// 单个凭据状态
+// Single credential status
 export interface CredentialStatusItem {
   id: number
   priority: number
@@ -34,7 +82,7 @@ export interface CredentialStatusItem {
   authMethod: string | null
   hasProfileArn: boolean
   email?: string
-  /** 自定义备注名（展示优先级高于 email） */
+  /** Custom display name (takes precedence over email when shown) */
   name?: string
   refreshTokenHash?: string
   apiKeyHash?: string
@@ -46,16 +94,80 @@ export interface CredentialStatusItem {
   refreshFailureCount: number
   disabledReason?: string
   endpoint: string
-  /** 凭据类型：kiro（默认）/ anthropic / openai（透传） */
+  /** Credential type: kiro (default) / anthropic / openai (passthrough) */
   kind?: string
-  /** 透传上游 base URL（仅透传凭据） */
+  /** Passthrough upstream base URL (passthrough credentials only) */
   baseUrl?: string
   rpm: RpmStatus
-  // 后端带回的本地缓存余额（未过期时才有），用于刷新页面后免手动查询即可展示
+  // Locally cached balance returned by the backend (only when not expired), so the page can show it after a refresh without a manual query
   cachedBalance?: BalanceResponse
 }
 
-// 单个模型的统计（累计调用/token + 实时 RPM）
+export interface CredentialDetail {
+  id: number
+  name?: string | null
+  accessToken?: string | null
+  refreshToken?: string | null
+  profileArn?: string | null
+  expiresAt?: string | null
+  authMethod?: string | null
+  clientId?: string | null
+  clientSecret?: string | null
+  provider?: string | null
+  startUrl?: string | null
+  tokenEndpoint?: string | null
+  issuerUrl?: string | null
+  scopes?: string | null
+  priority: number
+  region?: string | null
+  authRegion?: string | null
+  apiRegion?: string | null
+  machineId?: string | null
+  email?: string | null
+  subscriptionTitle?: string | null
+  proxyUrl?: string | null
+  proxyUsername?: string | null
+  proxyPassword?: string | null
+  kiroApiKey?: string | null
+  endpoint?: string | null
+  kind?: string | null
+  baseUrl?: string | null
+  upstreamApiKey?: string | null
+  disabled: boolean
+}
+
+export interface UpdateCredentialRequest {
+  name?: string
+  refreshToken?: string
+  authMethod?: string
+  clientId?: string
+  clientSecret?: string
+  provider?: string
+  startUrl?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string
+  priority?: number
+  region?: string
+  authRegion?: string
+  apiRegion?: string
+  machineId?: string
+  email?: string
+  proxyUrl?: string
+  proxyUsername?: string
+  proxyPassword?: string
+  kiroApiKey?: string
+  endpoint?: string
+  kind?: string
+  baseUrl?: string
+  upstreamApiKey?: string
+  profileArn?: string
+  expiresAt?: string
+  subscriptionTitle?: string
+  disabled?: boolean
+}
+
+// Statistics for a single model (cumulative calls/tokens + real-time RPM)
 export interface ModelStat {
   model: string
   requests: number
@@ -71,7 +183,7 @@ export interface ModelStat {
   rpm: number
 }
 
-// 监控指标响应（进程级计数器快照 + 凭据池概览 + 各模型统计）
+// Metrics response (process-level counter snapshot + credential pool overview + per-model stats)
 export interface MetricsResponse {
   requestsSuccess: number
   requestsError: number
@@ -87,7 +199,7 @@ export interface MetricsResponse {
   models: ModelStat[]
 }
 
-// 监控时间序列：单个时间桶
+// Monitoring timeseries: single time bucket
 export interface TimeBucket {
   bucket: number
   requests: number
@@ -98,7 +210,7 @@ export interface TimeBucket {
   credits: number
 }
 
-// 监控时间序列：某维度（模型 / 凭据）区间聚合
+// Monitoring timeseries: range aggregate for one dimension (model / credential)
 export interface DimBucket {
   key: string
   requests: number
@@ -109,7 +221,7 @@ export interface DimBucket {
   credits: number
 }
 
-// 监控时间序列响应
+// Monitoring timeseries response
 export interface TimeseriesResponse {
   from: number
   to: number
@@ -119,7 +231,7 @@ export interface TimeseriesResponse {
   byCredential: DimBucket[]
 }
 
-// 余额响应
+// Balance response
 export interface BalanceResponse {
   id: number
   subscriptionTitle: string | null
@@ -128,15 +240,22 @@ export interface BalanceResponse {
   remaining: number
   usagePercentage: number
   nextResetAt: number | null
+  available: boolean
 }
 
-// 成功响应
+// Available models response
+export interface AvailableModelsResponse {
+  anthropicModels: string[]
+  openaiModels: string[]
+}
+
+// Success response
 export interface SuccessResponse {
   success: boolean
   message: string
 }
 
-// 错误响应
+// Error response
 export interface AdminErrorResponse {
   error: {
     type: string
@@ -144,7 +263,7 @@ export interface AdminErrorResponse {
   }
 }
 
-// 请求类型
+// Request types
 export interface SetDisabledRequest {
   disabled: boolean
 }
@@ -157,30 +276,42 @@ export interface SetNameRequest {
   name: string | null
 }
 
-// 添加凭据请求
+// Add credential request
 export interface AddCredentialRequest {
+  name?: string
   refreshToken?: string
+  accessToken?: string
+  profileArn?: string
+  expiresAt?: string
   authMethod?: 'social' | 'idc' | 'api_key'
   clientId?: string
   clientSecret?: string
+  provider?: string
+  startUrl?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string
+  disabled?: boolean
   priority?: number
+  region?: string
   authRegion?: string
   apiRegion?: string
   machineId?: string
+  email?: string
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
   kiroApiKey?: string
   endpoint?: string
-  /** 凭据类型：kiro（默认）/ anthropic / openai（透传） */
+  /** Credential type: kiro (default) / anthropic / openai (passthrough) */
   kind?: 'kiro' | 'anthropic' | 'openai'
-  /** 透传上游 base URL（透传凭据必填） */
+  /** Passthrough upstream base URL (required for passthrough credentials) */
   baseUrl?: string
-  /** 透传上游 API Key（透传凭据必填，格式 sk-xxx） */
+  /** Passthrough upstream API Key (required for passthrough credentials, format sk-xxx) */
   upstreamApiKey?: string
 }
 
-// 添加凭据响应
+// Add credential response
 export interface AddCredentialResponse {
   success: boolean
   message: string
@@ -188,7 +319,7 @@ export interface AddCredentialResponse {
   email?: string
 }
 
-// 模型定义（与后端 ModelDef camelCase 对应）
+// Model definition (maps to backend ModelDef camelCase)
 export interface ModelDef {
   family: string
   version?: string | null
@@ -200,15 +331,15 @@ export interface ModelDef {
   contextWindow: number
 }
 
-// Write/Edit 分块写入策略
-// triggerLines：多大才需要分块；chunkLines：每块上限（与 Kiro 官方 WRITE_LIMIT 对齐）
+// Write/Edit chunked-write policy
+// triggerLines: how large before chunking is needed; chunkLines: max lines per chunk (aligned with Kiro's official WRITE_LIMIT)
 export interface ChunkedWritePolicy {
   enabled: boolean
   triggerLines: number
   chunkLines: number
 }
 
-// 应用配置（页面可编辑子集）当前值
+// Current values of the app config (page-editable subset)
 export interface AppConfig {
   apiKey: string
   adminApiKey: string
@@ -227,15 +358,17 @@ export interface AppConfig {
   modelAliases: Record<string, string>
   chunkedWritePolicy: ChunkedWritePolicy
   codexTruncationCorrection: boolean
-  /** 全局代理 URL（所有凭据默认走它） */
+  /** Auto re-enable credentials disabled for monthly quota once reset passes (default false) */
+  quotaResetRecoveryEnabled: boolean
+  /** Global proxy URL (all credentials use it by default) */
   proxyUrl?: string | null
-  /** 全局代理认证用户名 */
+  /** Global proxy auth username */
   proxyUsername?: string | null
-  /** 全局代理是否已设置密码（不回传明文） */
+  /** Whether a password is set for the global proxy (plaintext is never returned) */
   proxyPasswordSet: boolean
 }
 
-// 更新应用配置请求（全量替换可编辑子集）
+// Update app config request (full replacement of the editable subset)
 export interface UpdateAppConfigRequest {
   apiKey: string
   adminApiKey?: string
@@ -254,10 +387,11 @@ export interface UpdateAppConfigRequest {
   modelAliases: Record<string, string>
   chunkedWritePolicy: ChunkedWritePolicy
   codexTruncationCorrection?: boolean
-  /** 全局代理 URL；空串清除、缺省不改。需重启生效 */
+  quotaResetRecoveryEnabled?: boolean
+  /** Global proxy URL; empty string clears it, omitted leaves it unchanged. Takes effect after restart */
   proxyUrl?: string
-  /** 全局代理认证用户名；空串清除、缺省不改 */
+  /** Global proxy auth username; empty string clears it, omitted leaves it unchanged */
   proxyUsername?: string
-  /** 全局代理认证密码；空串清除、缺省保留原值 */
+  /** Global proxy auth password; empty string clears it, omitted keeps the current value */
   proxyPassword?: string
 }

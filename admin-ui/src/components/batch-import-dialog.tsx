@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { useCredentials, useAddCredential, useDeleteCredential } from '@/hooks/use-credentials'
 import { getCredentialBalance, setCredentialDisabled } from '@/api/credentials'
 import { extractErrorMessage, sha256Hex } from '@/lib/utils'
+import { normalizeCredentialImportItems } from '@/lib/credential-import'
 
 interface BatchImportDialogProps {
   open: boolean
@@ -62,7 +63,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
     } catch (error) {
       return {
         success: false,
-        error: `禁用失败: ${extractErrorMessage(error)}`,
+        error: `Failed to disable: ${extractErrorMessage(error)}`,
       }
     }
 
@@ -72,7 +73,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
     } catch (error) {
       return {
         success: false,
-        error: `删除失败: ${extractErrorMessage(error)}`,
+        error: `Failed to delete: ${extractErrorMessage(error)}`,
       }
     }
   }
@@ -85,18 +86,18 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
   }
 
   const handleBatchImport = async () => {
-    // 先单独解析 JSON，给出精准的错误提示
+    // Parse the JSON separately first so the error message is precise
     let credentials: CredentialInput[]
     try {
       const parsed = JSON.parse(jsonInput)
-      credentials = Array.isArray(parsed) ? parsed : [parsed]
+      credentials = normalizeCredentialImportItems(parsed) as CredentialInput[]
     } catch (error) {
-      toast.error('JSON 格式错误: ' + extractErrorMessage(error))
+      toast.error('Invalid JSON: ' + extractErrorMessage(error))
       return
     }
 
     if (credentials.length === 0) {
-      toast.error('没有可导入的凭据')
+      toast.error('No credentials to import')
       return
     }
 
@@ -104,14 +105,14 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
       setImporting(true)
       setProgress({ current: 0, total: credentials.length })
 
-      // 2. 初始化结果
+      // 2. Initialize the results
       const initialResults: VerificationResult[] = credentials.map((_, i) => ({
         index: i + 1,
         status: 'pending'
       }))
       setResults(initialResults)
 
-      // 3. 检测重复：OAuth 与 API Key 分别使用对应的 hash 集合
+      // 3. Duplicate detection: OAuth and API Keys each use their own hash set
       const existingOauthHashes = new Set(
         existingCredentials?.credentials
           .map(c => c.refreshTokenHash)
@@ -130,20 +131,20 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
       let rollbackFailedCount = 0
       let rollbackSkippedCount = 0
 
-      // 4. 导入并验活
+      // 4. Import and verify
       for (let i = 0; i < credentials.length; i++) {
         const cred = credentials[i]
         const isApiKeyCred = !!(cred.kiroApiKey?.trim()) || cred.authMethod === 'api_key'
 
-        // 更新状态为检查中
-        setCurrentProcessing(`正在处理凭据 ${i + 1}/${credentials.length}`)
+        // Mark the status as checking
+        setCurrentProcessing(`Processing credential ${i + 1}/${credentials.length}`)
         setResults(prev => {
           const newResults = [...prev]
           newResults[i] = { ...newResults[i], status: 'checking' }
           return newResults
         })
 
-        // 客户端去重：OAuth 基于 refreshToken hash，API Key 基于 kiroApiKey hash
+        // Client-side dedupe: OAuth by refreshToken hash, API Key by kiroApiKey hash
         let credHash = ''
         if (isApiKeyCred) {
           const apiKey = cred.kiroApiKey?.trim() || ''
@@ -153,7 +154,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               newResults[i] = {
                 ...newResults[i],
                 status: 'failed',
-                error: '缺少 kiroApiKey',
+                error: 'Missing kiroApiKey',
               }
               return newResults
             })
@@ -170,7 +171,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               newResults[i] = {
                 ...newResults[i],
                 status: 'duplicate',
-                error: '该凭据已存在',
+                error: 'This credential already exists',
                 email: existingCred?.email || undefined
               }
               return newResults
@@ -186,7 +187,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               newResults[i] = {
                 ...newResults[i],
                 status: 'failed',
-                error: '缺少 refreshToken',
+                error: 'Missing refreshToken',
               }
               return newResults
             })
@@ -203,7 +204,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               newResults[i] = {
                 ...newResults[i],
                 status: 'duplicate',
-                error: '该凭据已存在',
+                error: 'This credential already exists',
                 email: existingCred?.email || undefined
               }
               return newResults
@@ -213,7 +214,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           }
         }
 
-        // 更新状态为验活中
+        // Mark the status as verifying
         setResults(prev => {
           const newResults = [...prev]
           newResults[i] = { ...newResults[i], status: 'verifying' }
@@ -223,9 +224,9 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
         let addedCredId: number | null = null
 
         try {
-          // 添加凭据
+          // Add the credential
           if (isApiKeyCred) {
-            // API Key 凭据
+            // API Key credential
             const addedCred = await addCredential({
               authMethod: 'api_key',
               kiroApiKey: cred.kiroApiKey?.trim(),
@@ -238,15 +239,15 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
             addedCredId = addedCred.credentialId
 
-            // 延迟 1 秒
+            // Wait 1 second
             await new Promise(resolve => setTimeout(resolve, 1000))
 
-            // 验活
+            // Verify
             const balance = await getCredentialBalance(addedCred.credentialId)
 
             successCount++
             existingApiKeyHashes.add(credHash)
-            setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
+            setCurrentProcessing(addedCred.email ? `Verified: ${addedCred.email}` : `Verified: credential ${i + 1}`)
             setResults(prev => {
               const newResults = [...prev]
               newResults[i] = {
@@ -262,15 +263,15 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             continue
           }
 
-          // OAuth 凭据
+          // OAuth credential
           const token = cred.refreshToken!.trim()
           const clientId = cred.clientId?.trim() || undefined
           const clientSecret = cred.clientSecret?.trim() || undefined
           const authMethod = clientId && clientSecret ? 'idc' : 'social'
 
-          // idc 模式下必须同时提供 clientId 和 clientSecret
+          // idc mode requires both clientId and clientSecret
           if (authMethod === 'social' && (clientId || clientSecret)) {
-            throw new Error('idc 模式需要同时提供 clientId 和 clientSecret')
+            throw new Error('idc mode requires both clientId and clientSecret')
           }
 
           const addedCred = await addCredential({
@@ -287,16 +288,16 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
           addedCredId = addedCred.credentialId
 
-          // 延迟 1 秒
+          // Wait 1 second
           await new Promise(resolve => setTimeout(resolve, 1000))
 
-          // 验活
+          // Verify
           const balance = await getCredentialBalance(addedCred.credentialId)
 
-          // 验活成功
+          // Verification succeeded
           successCount++
           existingOauthHashes.add(credHash)
-          setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
+          setCurrentProcessing(addedCred.email ? `Verified: ${addedCred.email}` : `Verified: credential ${i + 1}`)
           setResults(prev => {
             const newResults = [...prev]
             newResults[i] = {
@@ -309,7 +310,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             return newResults
           })
         } catch (error) {
-          // 验活失败，尝试回滚（先禁用再删除）
+          // Verification failed; try to roll back (disable first, then delete)
           let rollbackStatus: VerificationResult['rollbackStatus'] = 'skipped'
           let rollbackError: string | undefined
 
@@ -345,21 +346,21 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
         setProgress({ current: i + 1, total: credentials.length })
       }
 
-      // 显示结果
+      // Show the results
       if (failCount === 0 && duplicateCount === 0) {
-        toast.success(`成功导入并验活 ${successCount} 个凭据`)
+        toast.success(`Imported and verified ${successCount} credentials`)
       } else {
         const failureSummary = failCount > 0
-          ? `，失败 ${failCount} 个（已排除 ${rollbackSuccessCount}，未排除 ${rollbackFailedCount}，无需排除 ${rollbackSkippedCount}）`
+          ? `, ${failCount} failed (${rollbackSuccessCount} cleaned up, ${rollbackFailedCount} not cleaned up, ${rollbackSkippedCount} needed no cleanup)`
           : ''
-        toast.info(`验活完成：成功 ${successCount} 个，重复 ${duplicateCount} 个${failureSummary}`)
+        toast.info(`Verification finished: ${successCount} succeeded, ${duplicateCount} duplicated${failureSummary}`)
 
         if (rollbackFailedCount > 0) {
-          toast.warning(`有 ${rollbackFailedCount} 个失败凭据回滚未完成，请手动禁用并删除`)
+          toast.warning(`${rollbackFailedCount} failed credentials were not rolled back; disable and delete them manually`)
         }
       }
     } catch (error) {
-      toast.error('导入失败: ' + extractErrorMessage(error))
+      toast.error('Import failed: ' + extractErrorMessage(error))
     } finally {
       setImporting(false)
     }
@@ -384,19 +385,19 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
   const getStatusText = (result: VerificationResult) => {
     switch (result.status) {
       case 'pending':
-        return '等待中'
+        return 'Pending'
       case 'checking':
-        return '检查重复...'
+        return 'Checking for duplicates...'
       case 'verifying':
-        return '验活中...'
+        return 'Verifying...'
       case 'verified':
-        return '验活成功'
+        return 'Verified'
       case 'duplicate':
-        return '重复凭据'
+        return 'Duplicate credential'
       case 'failed':
-        if (result.rollbackStatus === 'success') return '验活失败（已排除）'
-        if (result.rollbackStatus === 'failed') return '验活失败（未排除）'
-        return '验活失败（未创建）'
+        if (result.rollbackStatus === 'success') return 'Verification failed (cleaned up)'
+        if (result.rollbackStatus === 'failed') return 'Verification failed (not cleaned up)'
+        return 'Verification failed (not created)'
     }
   }
 
@@ -404,7 +405,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
     <Dialog
       open={open}
       onOpenChange={(newOpen) => {
-        // 关闭时清空表单（但不在导入过程中清空）
+        // Clear the form on close (but not while an import is running)
         if (!newOpen && !importing) {
           resetForm()
         }
@@ -413,32 +414,32 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
     >
       <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>批量导入凭据（自动验活）</DialogTitle>
+          <DialogTitle>Batch Import Credentials (auto-verify)</DialogTitle>
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto space-y-4 py-4">
           <div className="space-y-2">
             <label className="text-sm font-medium">
-              JSON 格式凭据
+              Credentials as JSON
             </label>
             <textarea
-              placeholder={'粘贴 JSON 格式的凭据（支持单个对象或数组）\n\nOAuth: [{"refreshToken":"...","clientId":"...","clientSecret":"..."}]\nAPI Key: [{"kiroApiKey":"ksk_xxx"}]\n\n支持 region 字段自动映射为 authRegion'}
+              placeholder={'Paste credentials as JSON (a single object or an array)\n\nOAuth: [{"refreshToken":"...","clientId":"...","clientSecret":"..."}]\nAPI Key: [{"kiroApiKey":"ksk_xxx"}]\n\nThe region field is automatically mapped to authRegion'}
               value={jsonInput}
               onChange={(e) => setJsonInput(e.target.value)}
               disabled={importing}
               className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono"
             />
             <p className="text-xs text-muted-foreground">
-              💡 导入时自动验活，失败的凭据会被排除
+              💡 Credentials are verified on import and failures are rolled back automatically
             </p>
           </div>
 
           {(importing || results.length > 0) && (
             <>
-              {/* 进度条 */}
+              {/* Progress bar */}
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
-                  <span>{importing ? '验活进度' : '验活完成'}</span>
+                  <span>{importing ? 'Verification progress' : 'Verification complete'}</span>
                   <span>{progress.current} / {progress.total}</span>
                 </div>
                 <div className="w-full bg-secondary rounded-full h-2">
@@ -454,20 +455,20 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                 )}
               </div>
 
-              {/* 统计 */}
+              {/* Summary counters */}
               <div className="flex gap-4 text-sm">
                 <span className="text-green-600 dark:text-green-400">
-                  ✓ 成功: {results.filter(r => r.status === 'verified').length}
+                  ✓ Succeeded: {results.filter(r => r.status === 'verified').length}
                 </span>
                 <span className="text-yellow-600 dark:text-yellow-400">
-                  ⚠ 重复: {results.filter(r => r.status === 'duplicate').length}
+                  ⚠ Duplicated: {results.filter(r => r.status === 'duplicate').length}
                 </span>
                 <span className="text-red-600 dark:text-red-400">
-                  ✗ 失败: {results.filter(r => r.status === 'failed').length}
+                  ✗ Failed: {results.filter(r => r.status === 'failed').length}
                 </span>
               </div>
 
-              {/* 结果列表 */}
+              {/* Result list */}
               <div className="border rounded-md divide-y max-h-[300px] overflow-y-auto">
                 {results.map((result) => (
                   <div key={result.index} className="p-3">
@@ -476,7 +477,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium">
-                            {result.email || `凭据 #${result.index}`}
+                            {result.email || `Credential #${result.index}`}
                           </span>
                           <span className="text-xs text-muted-foreground">
                             {getStatusText(result)}
@@ -484,7 +485,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                         </div>
                         {result.usage && (
                           <div className="text-xs text-muted-foreground mt-1">
-                            用量: {result.usage}
+                            Usage: {result.usage}
                           </div>
                         )}
                         {result.error && (
@@ -494,7 +495,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                         )}
                         {result.rollbackError && (
                           <div className="text-xs text-red-600 dark:text-red-400 mt-1">
-                            回滚失败: {result.rollbackError}
+                            Rollback failed: {result.rollbackError}
                           </div>
                         )}
                       </div>
@@ -516,7 +517,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             }}
             disabled={importing}
           >
-            {importing ? '验活中...' : results.length > 0 ? '关闭' : '取消'}
+            {importing ? 'Verifying...' : results.length > 0 ? 'Close' : 'Cancel'}
           </Button>
           {results.length === 0 && (
             <Button
@@ -524,7 +525,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               onClick={handleBatchImport}
               disabled={importing || !jsonInput.trim()}
             >
-              开始导入并验活
+              Start import and verify
             </Button>
           )}
         </DialogFooter>

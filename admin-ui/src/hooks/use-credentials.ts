@@ -9,53 +9,78 @@ import {
   getCredentialBalance,
   addCredential,
   deleteCredential,
+  importCredentials,
   getLoadBalancingMode,
   setLoadBalancingMode,
   getAppConfig,
+  getAvailableModels,
   updateAppConfig,
   getMetrics,
   getTimeseries,
+  getCredentialDetail,
+  updateCredential,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, CredentialExportItem, UpdateCredentialRequest } from '@/types/api'
 
-// 查询凭据列表
+// Query the credential list
 export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
-    refetchInterval: 30000, // 每 30 秒刷新一次
+    refetchInterval: 30000, // Refresh every 30 seconds
   })
 }
 
-// 查询监控指标（实时轮询）
+// Query monitoring metrics (real-time polling)
 export function useMetrics() {
   return useQuery({
     queryKey: ['metrics'],
     queryFn: getMetrics,
-    refetchInterval: 4000, // 每 4 秒刷新一次
+    refetchInterval: 4000, // Refresh every 4 seconds
   })
 }
 
-// 查询监控时间序列（趋势 + 按模型/凭据分布）
+// Query monitoring timeseries (trend + distribution by model/credential)
 export function useTimeseries(from: number, to: number, bucket: 'hour' | 'day') {
   return useQuery({
     queryKey: ['timeseries', from, to, bucket],
     queryFn: () => getTimeseries(from, to, bucket),
-    refetchInterval: 30000, // 每 30 秒刷新一次（历史聚合数据无需高频）
+    refetchInterval: 30000, // Refresh every 30 seconds (historical aggregates don't need high frequency)
   })
 }
 
-// 查询凭据余额
+// Query credential balance
 export function useCredentialBalance(id: number | null) {
   return useQuery({
     queryKey: ['credential-balance', id],
     queryFn: () => getCredentialBalance(id!),
     enabled: id !== null,
-    retry: false, // 余额查询失败时不重试（避免重复请求被封禁的账号）
+    retry: false, // Don't retry a failed balance query (avoid hammering a banned account)
   })
 }
 
-// 设置禁用状态
+export function useCredentialDetail(id: number | null, enabled = true) {
+  return useQuery({
+    queryKey: ['credential-detail', id],
+    queryFn: () => getCredentialDetail(id!),
+    enabled: enabled && id !== null,
+  })
+}
+
+export function useUpdateCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, request }: { id: number; request: UpdateCredentialRequest }) =>
+      updateCredential(id, request),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['credential-detail', variables.id] })
+      queryClient.invalidateQueries({ queryKey: ['credential-balance', variables.id] })
+    },
+  })
+}
+
+// Set disabled state
 export function useSetDisabled() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -67,7 +92,7 @@ export function useSetDisabled() {
   })
 }
 
-// 设置优先级
+// Set priority
 export function useSetPriority() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -79,7 +104,7 @@ export function useSetPriority() {
   })
 }
 
-// 设置备注名
+// Set display name
 export function useSetName() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -91,7 +116,7 @@ export function useSetName() {
   })
 }
 
-// 重置失败计数
+// Reset the failure counter
 export function useResetFailure() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -102,7 +127,7 @@ export function useResetFailure() {
   })
 }
 
-// 强制刷新 Token
+// Force refresh the token
 export function useForceRefreshToken() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -113,7 +138,7 @@ export function useForceRefreshToken() {
   })
 }
 
-// 添加新凭据
+// Add a new credential
 export function useAddCredential() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -124,7 +149,7 @@ export function useAddCredential() {
   })
 }
 
-// 删除凭据
+// Delete a credential
 export function useDeleteCredential() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -135,7 +160,18 @@ export function useDeleteCredential() {
   })
 }
 
-// 获取负载均衡模式
+// Batch import credentials (backup restore/migration)
+export function useImportCredentials() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (credentials: CredentialExportItem[]) => importCredentials(credentials),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// Get the load balancing mode
 export function useLoadBalancingMode() {
   return useQuery({
     queryKey: ['loadBalancingMode'],
@@ -143,7 +179,7 @@ export function useLoadBalancingMode() {
   })
 }
 
-// 设置负载均衡模式
+// Set the load balancing mode
 export function useSetLoadBalancingMode() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -154,7 +190,7 @@ export function useSetLoadBalancingMode() {
   })
 }
 
-// 获取应用配置
+// Get app config
 export function useAppConfig() {
   return useQuery({
     queryKey: ['appConfig'],
@@ -162,13 +198,23 @@ export function useAppConfig() {
   })
 }
 
-// 更新应用配置
+// Get available models from credentials
+export function useAvailableModels() {
+  return useQuery({
+    queryKey: ['availableModels'],
+    queryFn: getAvailableModels,
+    staleTime: 60000, // Cache for 1 minute
+  })
+}
+
+// Update app config
 export function useUpdateAppConfig() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: updateAppConfig,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appConfig'] })
+      queryClient.invalidateQueries({ queryKey: ['availableModels'] })
     },
   })
 }

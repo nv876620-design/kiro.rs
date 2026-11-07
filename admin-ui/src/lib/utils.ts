@@ -6,20 +6,20 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * 解析后端错误响应，提取用户友好的错误信息
+ * Parse backend error responses and extract user-friendly error info
  */
 export interface ParsedError {
-  /** 简短的错误标题 */
+  /** Short error title */
   title: string
-  /** 详细的错误描述 */
+  /** Detailed error description */
   detail?: string
-  /** 错误类型 */
+  /** Error type */
   type?: string
 }
 
 /**
- * 从错误对象中提取错误消息
- * 支持 Axios 错误和普通 Error 对象
+ * Extract an error message from an error object
+ * Supports Axios errors and plain Error objects
  */
 export function extractErrorMessage(error: unknown): string {
   const parsed = parseError(error)
@@ -27,11 +27,11 @@ export function extractErrorMessage(error: unknown): string {
 }
 
 /**
- * 解析错误，返回结构化的错误信息
+ * Parse an error and return structured error info
  */
 export function parseError(error: unknown): ParsedError {
   if (!error || typeof error !== 'object') {
-    return { title: '未知错误' }
+    return { title: 'Unknown error' }
   }
 
   const axiosError = error as Record<string, unknown>
@@ -39,12 +39,12 @@ export function parseError(error: unknown): ParsedError {
   const data = response?.data as Record<string, unknown> | undefined
   const errorObj = data?.error as Record<string, unknown> | undefined
 
-  // 尝试从后端错误响应中提取信息
+  // Try to extract info from the backend error response
   if (errorObj && typeof errorObj.message === 'string') {
     const message = errorObj.message
     const type = typeof errorObj.type === 'string' ? errorObj.type : undefined
 
-    // 解析嵌套的错误信息（如：上游服务错误: 权限不足: 403 {...}）
+    // Parse nested error message (e.g. upstream service error: insufficient permission: 403 {...})
     const parsed = parseNestedErrorMessage(message)
 
     return {
@@ -54,35 +54,35 @@ export function parseError(error: unknown): ParsedError {
     }
   }
 
-  // 回退到 Error.message
+  // Fall back to Error.message
   if ('message' in axiosError && typeof axiosError.message === 'string') {
     return { title: axiosError.message }
   }
 
-  return { title: '未知错误' }
+  return { title: 'Unknown error' }
 }
 
 /**
- * 解析嵌套的错误消息
- * 例如："上游服务错误: 权限不足，无法获取使用额度: 403 Forbidden {...}"
+ * Parse a nested error message
+ * e.g. "upstream service error: insufficient permission to get usage quota: 403 Forbidden {...}"
  */
 function parseNestedErrorMessage(message: string): { title: string; detail?: string } {
-  // 尝试提取 HTTP 状态码（如 403、502 等）
+  // Try to extract the HTTP status code (e.g. 403, 502)
   const statusMatch = message.match(/(\d{3})\s+\w+/)
   const statusCode = statusMatch ? statusMatch[1] : null
 
-  // 尝试提取 JSON 中的 message 字段
+  // Try to extract the "message" field from the JSON body
   const jsonMatch = message.match(/\{[^{}]*"message"\s*:\s*"([^"]+)"[^{}]*\}/)
   if (jsonMatch) {
     const innerMessage = jsonMatch[1]
-    // 提取主要错误原因（去掉前缀）
+    // Extract the main error reason (strip the prefix)
     const parts = message.split(':').map(s => s.trim())
     const mainReason = parts.length > 1 ? parts[1].split(':')[0] : parts[0]
 
-    // 在 title 中包含状态码
+    // Include the status code in the title
     const title = statusCode
-      ? `${mainReason || '服务错误'} (${statusCode})`
-      : (mainReason || '服务错误')
+      ? `${mainReason || 'Service error'} (${statusCode})`
+      : (mainReason || 'Service error')
 
     return {
       title,
@@ -90,7 +90,7 @@ function parseNestedErrorMessage(message: string): { title: string; detail?: str
     }
   }
 
-  // 尝试按冒号分割，提取主要信息
+  // Try splitting on colons to extract the main info
   const colonParts = message.split(':')
   if (colonParts.length >= 2) {
     const mainPart = colonParts[1].trim().split(':')[0].trim()
@@ -109,31 +109,32 @@ function parseNestedErrorMessage(message: string): { title: string; detail?: str
 
 
 /**
- * 计算字符串的 SHA-256 哈希（十六进制）
+ * Compute the SHA-256 hash of a string (hex)
  *
- * 优先使用 Web Crypto API（crypto.subtle），在非安全上下文（HTTP + 非 localhost）中
- * 自动回退到纯 JS 实现，解决 Docker 部署时 crypto.subtle 不可用的问题。
+ * Prefers the Web Crypto API (crypto.subtle) and automatically falls back to a
+ * pure-JS implementation in non-secure contexts (HTTP + non-localhost), which
+ * solves crypto.subtle being unavailable in Docker deployments.
  */
 export async function sha256Hex(value: string): Promise<string> {
   const encoded = new TextEncoder().encode(value)
 
-  // 安全上下文中使用原生 Web Crypto API（性能更好）
+  // Use the native Web Crypto API in secure contexts (better performance)
   if (typeof crypto !== 'undefined' && crypto.subtle) {
     const digest = await crypto.subtle.digest('SHA-256', encoded)
     const bytes = new Uint8Array(digest)
     return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
   }
 
-  // 非安全上下文 fallback：纯 JS SHA-256 实现
+  // Non-secure context fallback: pure-JS SHA-256 implementation
   return sha256Pure(encoded)
 }
 
 /**
- * 纯 JS SHA-256 实现（无外部依赖）
- * 仅在 crypto.subtle 不可用时使用
+ * Pure-JS SHA-256 implementation (no external dependencies)
+ * Only used when crypto.subtle is unavailable
  */
 function sha256Pure(data: Uint8Array): string {
-  // SHA-256 常量：前 64 个素数的立方根的小数部分
+  // SHA-256 constants: fractional parts of the cube roots of the first 64 primes
   const K = new Uint32Array([
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -147,18 +148,18 @@ function sha256Pure(data: Uint8Array): string {
 
   const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n))
 
-  // 预处理：填充消息
+  // Pre-processing: pad the message
   const bitLen = data.length * 8
-  // 消息 + 1 字节 0x80 + 填充 + 8 字节长度，总长度对齐到 64 字节
+  // message + 1 byte 0x80 + padding + 8-byte length, total aligned to 64 bytes
   const padLen = (((data.length + 9 + 63) >>> 6) << 6)
   const buf = new Uint8Array(padLen)
   buf.set(data)
   buf[data.length] = 0x80
-  // 写入 64 位大端长度（仅低 32 位，高 32 位在 JS 中始终为 0）
+  // Write the 64-bit big-endian length (only the low 32 bits; the high 32 bits are always 0 in JS)
   const view = new DataView(buf.buffer)
   view.setUint32(padLen - 4, bitLen, false)
 
-  // 初始哈希值
+  // Initial hash values
   let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a
   let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19
 
