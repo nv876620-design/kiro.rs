@@ -354,7 +354,6 @@ export interface AppConfig {
   nodeVersion: string
   streamingSdkVersion: string
   models: ModelDef[]
-  defaultModel?: string | null
   modelAliases: Record<string, string>
   chunkedWritePolicy: ChunkedWritePolicy
   codexTruncationCorrection: boolean
@@ -383,7 +382,6 @@ export interface UpdateAppConfigRequest {
   nodeVersion: string
   streamingSdkVersion: string
   models: ModelDef[]
-  defaultModel?: string | null
   modelAliases: Record<string, string>
   chunkedWritePolicy: ChunkedWritePolicy
   codexTruncationCorrection?: boolean
@@ -394,4 +392,25 @@ export interface UpdateAppConfigRequest {
   proxyUsername?: string
   /** Global proxy auth password; empty string clears it, omitted keeps the current value */
   proxyPassword?: string
+}
+
+// AWS SSO（IdC）凭据导出文件中的单条凭据（可直接回导）
+export interface SsoExportItem {
+  refreshToken: string
+  clientId: string
+  clientSecret: string
+  region: string
+  apiRegion?: string
+  email?: string
+  name?: string
+}
+
+// AWS SSO 凭据导出文件（即导出接口响应）
+export interface SsoExportFile {
+  type: 'kiro-rs-aws-sso-credentials'
+  version: number
+  exportedAt: string
+  /** 被跳过的凭据数（非 IdC 或字段不全） */
+  skipped: number
+  credentials: SsoExportItem[]
 }

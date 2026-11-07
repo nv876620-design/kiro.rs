@@ -733,7 +733,11 @@ impl StreamContext {
         // contextUsageEvent covers post-generation whole context (includes this
         // turn's output), so subtract output to avoid double-counting
         // (upstream fix: input_tokens excluding output).
-        if let Some(exact) = self.token_usage.as_ref().and_then(|u| u.anthropic_input_tokens()) {
+        if let Some(exact) = self
+            .token_usage
+            .as_ref()
+            .and_then(|u| u.anthropic_input_tokens())
+        {
             return exact;
         }
         crate::token::input_tokens_excluding_output(

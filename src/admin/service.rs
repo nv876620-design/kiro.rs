@@ -16,10 +16,14 @@ use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AppConfigResponse, BalanceResponse,
     CredentialStatusItem, CredentialsExportResponse, CredentialsStatusResponse, DimBucketDto,
-    ExportedAccount, ExportedCredentials, ImportCredentialsResponse, ImportFailedItem,
-    LoadBalancingModeResponse, MetricsResponse, ModelStat, SetLoadBalancingModeRequest,
-    TimeBucketDto, TimeseriesResponse, UpdateAppConfigRequest,
+    ExportSsoCredentialsRequest, ExportSsoCredentialsResponse, ExportedAccount,
+    ExportedCredentials, ImportCredentialsResponse, ImportFailedItem, LoadBalancingModeResponse,
+    MetricsResponse, ModelStat, SetLoadBalancingModeRequest, SsoExportItem, TimeBucketDto,
+    TimeseriesResponse, UpdateAppConfigRequest,
 };
+
+/// AWS SSO 凭据导出文件的类型标识（前端导入据此识别）
+const SSO_EXPORT_TYPE: &str = "kiro-rs-aws-sso-credentials";
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
@@ -45,7 +49,13 @@ fn expires_at_millis(raw: Option<&str>) -> i64 {
     // 兼容旧备份里把时间戳存成字符串的写法。
     value
         .parse::<i64>()
-        .map(|raw| if raw > 10_000_000_000 { raw } else { raw * 1000 })
+        .map(|raw| {
+            if raw > 10_000_000_000 {
+                raw
+            } else {
+                raw * 1000
+            }
+        })
         .unwrap_or(0)
 }
 
@@ -694,6 +704,95 @@ impl AdminService {
         })
     }
 
+    /// 导出 AWS SSO（IdC）凭据（含 refreshToken / clientSecret 明文，仅限 Admin 鉴权后调用）
+    ///
+    /// `ids` 为空表示导出全部；非 IdC 或缺少 refreshToken/clientId/clientSecret 的计入 skipped。
+    pub fn export_sso_credentials(
+        &self,
+        req: ExportSsoCredentialsRequest,
+    ) -> Result<ExportSsoCredentialsResponse, AdminServiceError> {
+        let config = self.token_manager.config();
+        let all = self.token_manager.credentials_for_export();
+        let wanted: Option<HashSet<u64>> = req
+            .ids
+            .filter(|ids| !ids.is_empty())
+            .map(|ids| ids.into_iter().collect());
+        tracing::info!(
+            "导出 AWS SSO 凭据：请求范围 {}，凭据池共 {} 个",
+            match &wanted {
+                Some(w) => format!("指定 {} 个 ID", w.len()),
+                None => "全部".to_string(),
+            },
+            all.len()
+        );
+
+        if let Some(missing) = wanted
+            .as_ref()
+            .and_then(|w| w.iter().find(|id| !all.iter().any(|(eid, _)| eid == *id)))
+        {
+            tracing::warn!("导出 AWS SSO 凭据：凭据 #{} 不存在", missing);
+            return Err(AdminServiceError::NotFound { id: *missing });
+        }
+
+        let non_empty = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        let mut credentials = Vec::new();
+        let mut skipped = 0usize;
+        for (id, cred) in all.iter() {
+            if wanted.as_ref().is_some_and(|w| !w.contains(id)) {
+                continue;
+            }
+            let fields = (
+                non_empty(&cred.refresh_token),
+                non_empty(&cred.client_id),
+                non_empty(&cred.client_secret),
+            );
+            match (cred.is_idc() && !cred.is_api_key_credential(), fields) {
+                (true, (Some(refresh_token), Some(client_id), Some(client_secret))) => {
+                    tracing::debug!("导出 AWS SSO 凭据：#{} 已导出", id);
+                    credentials.push(SsoExportItem {
+                        refresh_token,
+                        client_id,
+                        client_secret,
+                        region: cred.effective_auth_region(&config).to_string(),
+                        api_region: cred.api_region.clone(),
+                        email: cred.email.clone(),
+                        name: cred.name.clone(),
+                    });
+                }
+                (is_idc, _) => {
+                    tracing::debug!(
+                        "导出 AWS SSO 凭据：#{} 跳过（{}）",
+                        id,
+                        if is_idc {
+                            "缺少 refreshToken/clientId/clientSecret"
+                        } else {
+                            "非 IdC 凭据"
+                        }
+                    );
+                    skipped += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            "导出 AWS SSO 凭据完成：导出 {} 个，跳过 {} 个",
+            credentials.len(),
+            skipped
+        );
+        Ok(ExportSsoCredentialsResponse {
+            kind: SSO_EXPORT_TYPE,
+            version: 1,
+            exported_at: Utc::now().to_rfc3339(),
+            skipped,
+            credentials,
+        })
+    }
+
     /// 删除凭据
     pub fn delete_credential(&self, id: u64) -> Result<(), AdminServiceError> {
         self.token_manager
@@ -795,11 +894,9 @@ impl AdminService {
             };
 
             // Pre-check dedupe (plaintext compare; add_credential re-checks by hash).
-            let is_dupe = if req
-                .kind
-                .as_deref()
-                .is_some_and(|k| k.eq_ignore_ascii_case("anthropic") || k.eq_ignore_ascii_case("openai"))
-            {
+            let is_dupe = if req.kind.as_deref().is_some_and(|k| {
+                k.eq_ignore_ascii_case("anthropic") || k.eq_ignore_ascii_case("openai")
+            }) {
                 req.upstream_api_key
                     .as_deref()
                     .map(str::trim)
@@ -920,7 +1017,6 @@ impl AdminService {
             node_version: config.node_version.clone(),
             streaming_sdk_version: config.streaming_sdk_version.clone(),
             models: config.effective_models(),
-            default_model: config.default_model.clone(),
             model_aliases: config.model_aliases.clone(),
             chunked_write_policy: config.chunked_write_policy.clone(),
             codex_truncation_correction: config.codex_truncation_correction,
@@ -1004,15 +1100,6 @@ impl AdminService {
                 ));
             }
         }
-        if req
-            .default_model
-            .as_ref()
-            .is_some_and(|s| s.trim().is_empty())
-        {
-            return Err(AdminServiceError::InvalidCredential(
-                "defaultModel 不能为空字符串".to_string(),
-            ));
-        }
         // 分块写入策略：仅在启用时校验行数（关闭时数值无意义，允许任意残留值）
         if let Some(ref p) = req.chunked_write_policy
             && p.enabled
@@ -1034,11 +1121,6 @@ impl AdminService {
             .iter()
             .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
             .collect();
-        let default_model = req
-            .default_model
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
 
         // ---- 读盘 → 改字段 → 回写 ----
         let config_path = self
@@ -1089,7 +1171,6 @@ impl AdminService {
         new_config.streaming_sdk_version = req.streaming_sdk_version.trim().to_string();
         new_config.models = Some(req.models.clone());
         new_config.model_aliases = normalized_aliases.clone();
-        new_config.default_model = default_model.clone();
         if let Some(ref policy) = req.chunked_write_policy {
             new_config.chunked_write_policy = policy.clone();
         }
@@ -1140,7 +1221,7 @@ impl AdminService {
             // 热替换 adminApiKey：认证中间件与本服务共享该句柄，立即生效
             *self.shared_admin_api_key.write() = k;
         }
-        crate::anthropic::init_model_mapping(req.models, normalized_aliases, default_model);
+        crate::anthropic::init_model_mapping(req.models, normalized_aliases);
         crate::anthropic::set_chunked_write_policy(new_config.chunked_write_policy.clone());
         crate::openai::set_codex_truncation_correction(new_config.codex_truncation_correction);
         self.token_manager.replace_config(new_config);
@@ -1300,8 +1381,8 @@ impl AdminService {
 
     /// 获取可用模型列表（从所有 credentials 实时获取）
     pub async fn get_available_models(&self) -> super::types::AvailableModelsResponse {
-        use std::collections::HashSet;
         use crate::kiro::list_models::fetch_kiro_models;
+        use std::collections::HashSet;
 
         let mut all_model_ids = HashSet::new();
         let config = self.token_manager.config();
@@ -1322,7 +1403,11 @@ impl AdminService {
         let global_proxy = self.token_manager.proxy();
 
         for (id, cred, disabled) in candidates {
-            tracing::info!("Attempting to fetch models via credential #{} (disabled={})", id, disabled);
+            tracing::info!(
+                "Attempting to fetch models via credential #{} (disabled={})",
+                id,
+                disabled
+            );
 
             // 确保 Token 有效（若过期则自动刷新；IdC 缺失 profileArn 会自动探测持久化）
             let ctx = match self.token_manager.try_ensure_token(id, &cred).await {
@@ -1344,9 +1429,22 @@ impl AdminService {
 
             let mut success_for_this = false;
             for region in [primary_region, fallback_region] {
-                match fetch_kiro_models(&ctx.credentials, &ctx.token, Some(region), &config, effective_proxy.as_ref()).await {
+                match fetch_kiro_models(
+                    &ctx.credentials,
+                    &ctx.token,
+                    Some(region),
+                    &config,
+                    effective_proxy.as_ref(),
+                )
+                .await
+                {
                     Ok(models) => {
-                        tracing::info!("Credential #{} returned {} models in region {}", id, models.len(), region);
+                        tracing::info!(
+                            "Credential #{} returned {} models in region {}",
+                            id,
+                            models.len(),
+                            region
+                        );
                         for model in models {
                             all_model_ids.insert(model.model_id);
                         }
@@ -1355,7 +1453,12 @@ impl AdminService {
                         break;
                     }
                     Err(e) => {
-                        tracing::debug!("Failed to fetch models from credential #{} in region {}: {}", id, region, e);
+                        tracing::debug!(
+                            "Failed to fetch models from credential #{} in region {}: {}",
+                            id,
+                            region,
+                            e
+                        );
                     }
                 }
             }
@@ -1381,11 +1484,8 @@ impl AdminService {
         tracing::info!("Total unique models: {}", anthropic_models.len());
 
         // OpenAI models 从 config 获取
-        let mut openai_models: Vec<String> = config
-            .model_aliases
-            .keys()
-            .map(|k| k.clone())
-            .collect();
+        let mut openai_models: Vec<String> =
+            config.model_aliases.keys().map(|k| k.clone()).collect();
         openai_models.sort();
         openai_models.dedup();
 
@@ -1399,6 +1499,7 @@ impl AdminService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::config::Config;
 
     fn test_service() -> AdminService {
         let manager = Arc::new(
@@ -1437,12 +1538,11 @@ mod tests {
         // (unparsable as AddCredentialRequest is impossible via JSON type
         // mismatch — use an empty object, missing kiroApiKey), then re-import
         // the same valid one to hit the duplicate path.
-        let valid = serde_json::json!({"authMethod": "api_key", "kiroApiKey": "ksk_test_import_123"});
+        let valid =
+            serde_json::json!({"authMethod": "api_key", "kiroApiKey": "ksk_test_import_123"});
         let invalid = serde_json::json!({});
 
-        let first = svc
-            .import_credentials(vec![valid.clone(), invalid])
-            .await;
+        let first = svc.import_credentials(vec![valid.clone(), invalid]).await;
         assert_eq!(first.added, 1);
         assert_eq!(first.failed.len(), 1);
         assert_eq!(first.failed[0].index, 1);
@@ -1522,5 +1622,79 @@ mod tests {
             parsed["accounts"][0]["credentials"]["authRegion"],
             "us-east-1"
         );
+    }
+
+    fn service_with(creds: Vec<KiroCredentials>) -> AdminService {
+        let manager = MultiTokenManager::new(Config::default(), creds, None, None, false).unwrap();
+        AdminService::new(
+            Arc::new(manager),
+            Vec::<String>::new(),
+            Arc::new(parking_lot::RwLock::new(String::new())),
+            Arc::new(parking_lot::RwLock::new(String::new())),
+        )
+    }
+
+    fn idc_cred(token: &str, region: Option<&str>) -> KiroCredentials {
+        KiroCredentials {
+            refresh_token: Some(token.repeat(150)),
+            auth_method: Some("idc".to_string()),
+            client_id: Some("cid".to_string()),
+            client_secret: Some("secret".to_string()),
+            region: region.map(String::from),
+            email: Some("a@example.com".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_export_sso_credentials_only_idc() {
+        let social = KiroCredentials {
+            refresh_token: Some("s".repeat(150)),
+            auth_method: Some("social".to_string()),
+            ..Default::default()
+        };
+        let svc = service_with(vec![idc_cred("a", Some("eu-west-1")), social]);
+
+        let resp = svc
+            .export_sso_credentials(ExportSsoCredentialsRequest::default())
+            .unwrap();
+        assert_eq!(resp.kind, SSO_EXPORT_TYPE);
+        assert_eq!(resp.credentials.len(), 1);
+        assert_eq!(resp.skipped, 1);
+        let item = &resp.credentials[0];
+        assert_eq!(item.client_id, "cid");
+        assert_eq!(item.client_secret, "secret");
+        assert_eq!(item.region, "eu-west-1");
+        assert_eq!(item.refresh_token, "a".repeat(150));
+    }
+
+    #[test]
+    fn test_export_sso_credentials_by_ids() {
+        let svc = service_with(vec![idc_cred("a", None), idc_cred("b", None)]);
+        let ids: Vec<u64> = svc
+            .get_all_credentials()
+            .credentials
+            .iter()
+            .map(|c| c.id)
+            .collect();
+
+        let resp = svc
+            .export_sso_credentials(ExportSsoCredentialsRequest {
+                ids: Some(vec![ids[1]]),
+            })
+            .unwrap();
+        assert_eq!(resp.credentials.len(), 1);
+        // 未配置凭据级 region 时回退到全局配置
+        assert_eq!(
+            resp.credentials[0].region,
+            Config::default().effective_auth_region()
+        );
+
+        let err = svc
+            .export_sso_credentials(ExportSsoCredentialsRequest {
+                ids: Some(vec![9999]),
+            })
+            .unwrap_err();
+        assert!(matches!(err, AdminServiceError::NotFound { id: 9999 }));
     }
 }

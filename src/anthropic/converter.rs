@@ -21,14 +21,12 @@ use crate::model::config::{ChunkedWritePolicy, ModelDef, default_models};
 
 use super::types::{ContentBlock, MessagesRequest};
 
-/// 全局模型注册表设置（模型表 + 别名 + 默认回退）
+/// 全局模型注册表设置（模型表 + 别名）
 #[derive(Debug, Clone)]
 pub struct ModelRegistrySettings {
     pub models: Vec<ModelDef>,
     /// 客户端模型名（小写）→ 目标模型名
     pub aliases: HashMap<String, String>,
-    /// 未匹配时的回退模型名
-    pub default_model: Option<String>,
 }
 
 impl Default for ModelRegistrySettings {
@@ -36,7 +34,6 @@ impl Default for ModelRegistrySettings {
         Self {
             models: default_models(),
             aliases: HashMap::new(),
-            default_model: None,
         }
     }
 }
@@ -61,20 +58,12 @@ fn registry() -> &'static RwLock<Arc<ModelRegistrySettings>> {
 /// 应在启动早期、任何请求进入前调用一次。若注册表尚未初始化则直接以注入值建立；
 /// 否则等价于一次热替换（见 [`set_model_registry`]）。
 pub fn init_model_registry(models: Vec<ModelDef>) {
-    init_model_mapping(models, HashMap::new(), None);
+    init_model_mapping(models, HashMap::new());
 }
 
-/// 初始化模型表、别名与默认回退（Codex / OpenAI 客户端模型名映射）
-pub fn init_model_mapping(
-    models: Vec<ModelDef>,
-    aliases: HashMap<String, String>,
-    default_model: Option<String>,
-) {
-    let settings = ModelRegistrySettings {
-        models,
-        aliases,
-        default_model,
-    };
+/// 初始化模型表与别名（Codex / OpenAI 客户端模型名映射）
+pub fn init_model_mapping(models: Vec<ModelDef>, aliases: HashMap<String, String>) {
+    let settings = ModelRegistrySettings { models, aliases };
     if MODEL_REGISTRY
         .set(RwLock::new(Arc::new(settings.clone())))
         .is_err()
@@ -85,13 +74,12 @@ pub fn init_model_mapping(
 
 /// 运行时热替换全局模型表（Admin API 修改 models 后调用）。
 ///
-/// 保留现有 aliases / default_model 不变。
+/// 保留现有 aliases 不变。
 pub fn set_model_registry(models: Vec<ModelDef>) {
     let current = registry().read().clone();
     set_model_registry_settings(ModelRegistrySettings {
         models,
         aliases: current.aliases.clone(),
-        default_model: current.default_model.clone(),
     });
 }
 
@@ -167,22 +155,6 @@ fn match_model_def(model: &str) -> Option<ModelDef> {
             );
         }
         return Some(def);
-    }
-
-    if let Some(default) = settings().default_model.clone() {
-        if default.to_lowercase() != model.to_lowercase()
-            && default.to_lowercase() != resolved.to_lowercase()
-        {
-            if let Some(def) = lookup_model_def(&resolve_aliases(&default)) {
-                tracing::debug!(
-                    original = %model,
-                    default = %default,
-                    kiro_id = %def.kiro_id,
-                    "模型映射: 使用 defaultModel 回退"
-                );
-                return Some(def);
-            }
-        }
     }
 
     None
@@ -1366,6 +1338,106 @@ fn merge_user_messages(
     })
 }
 
+/// 净化历史 assistant 文本中「泄漏为纯文本的工具调用」。
+///
+/// 背景：Claude 模型（尤其 opus-4-8、长上下文）偶发把本该走结构化通道的工具调用
+/// 降级成训练格式的文本 XML 吐出——形如：
+///
+/// ```text
+/// count
+/// <invoke name="Bash">
+/// <parameter name="command">git status</parameter>
+/// </invoke>
+/// ```
+///
+/// 特征（据本地会话日志 100+ 真实样本归纳）：
+/// - `<invoke>` 前常有一个孤立单行的 stray 前缀词（count / core / county / card …，不固定）；
+/// - 没有外层 `<function_calls>` 包裹；
+/// - 可能整段只有 XML，也可能前面跟着正常散文；
+/// - 单块可能有多个 `<invoke>`；也有无闭合 `</invoke>` 的截断变体、无 `<parameter>` 的无参变体。
+///
+/// 危害：这段文本会原样回传给上游，成为 few-shot 坏样本，诱导模型后续每轮模仿，
+/// 导致「工具调用一直写成文本」且会话内无法自愈（详见 anthropics/claude-code #77061 / #62344）。
+///
+/// 处理：直接剥除泄漏片段（stray 前缀词 + `<invoke>...</invoke>`），保留前面的正常散文。
+/// 不重建成结构化 `tool_use`——因为泄漏调用在历史里没有对应 `tool_result`，重建后会被
+/// `validate_tool_pairing` / `remove_orphaned_tool_uses` 当孤立 tool_use 删掉，绕一圈等价于剥除。
+///
+/// 返回：`(净化后的文本, 是否发生过净化)`。
+fn sanitize_leaked_tool_calls(text: &str) -> (String, bool) {
+    // 快速路径：绝大多数消息不含泄漏，直接返回。
+    if !text.contains("<invoke name=") {
+        return (text.to_string(), false);
+    }
+
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+
+    while let Some(pos) = rest.find("<invoke name=") {
+        // pos 之前的部分：保留，但要尝试剥掉紧邻 `<invoke` 的 stray 前缀词。
+        let (before, stripped_prefix) = strip_stray_prefix(&rest[..pos]);
+        result.push_str(before);
+
+        // 定位 `<invoke>` 块的结束：优先闭合的 `</invoke>`；找不到则视为截断，
+        // 从 `<invoke` 到文本末尾整体剥除。
+        let block_rest = &rest[pos..];
+        let block_end = block_rest.find("</invoke>").map(|e| e + "</invoke>".len());
+
+        // 只要命中 `<invoke`（无论前缀词是否存在）就算发生了净化。
+        let _ = stripped_prefix;
+        changed = true;
+
+        match block_end {
+            Some(end) => {
+                // 剥掉整个 `<invoke ...>...</invoke>` 块，继续处理其后内容。
+                rest = &block_rest[end..];
+            }
+            None => {
+                // 无闭合标签（模型输出被截断）：剥到末尾，结束。
+                rest = "";
+                break;
+            }
+        }
+    }
+
+    result.push_str(rest);
+
+    if changed {
+        // 剥除后可能残留多余空行/首尾空白，收敛一下。
+        let cleaned = result.trim().to_string();
+        (cleaned, true)
+    } else {
+        (text.to_string(), false)
+    }
+}
+
+/// 剥除紧邻 `<invoke` 之前的 stray 前缀词（如孤立一行的 `count` / `core` / `card`）。
+///
+/// 判定：`before` 末尾（去掉尾部空白后）的最后一行，若是一个「短的、纯 ASCII 字母的单词」
+/// （长度 1..=20、无空格、全为 ASCII 字母），则视为 stray 前缀词剥掉。
+/// 用特征判定而非硬编码词表，因为前缀词不固定。
+///
+/// 返回：`(剥除后的前缀内容, 是否剥掉了前缀词)`。
+fn strip_stray_prefix(before: &str) -> (&str, bool) {
+    let trimmed = before.trim_end();
+    // 找最后一行的起点
+    let last_line_start = trimmed.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let last_line = &trimmed[last_line_start..];
+
+    let is_stray = !last_line.is_empty()
+        && last_line.len() <= 20
+        && last_line.chars().all(|c| c.is_ascii_alphabetic());
+
+    if is_stray {
+        // 连同该行一起剥掉（保留其之前的散文）。
+        (&trimmed[..last_line_start], true)
+    } else {
+        // 保留原始 before（含其原有的尾部换行，交由上层 trim 收敛）。
+        (before, false)
+    }
+}
+
 /// 转换 assistant 消息
 fn convert_assistant_message(
     msg: &super::types::Message,
@@ -1377,7 +1449,13 @@ fn convert_assistant_message(
 
     match &msg.content {
         serde_json::Value::String(s) => {
-            text_content = s.clone();
+            let (cleaned, changed) = sanitize_leaked_tool_calls(s);
+            if changed {
+                tracing::warn!(
+                    "检测到历史 assistant 文本中的工具调用泄漏（<invoke> XML），已净化以防止 few-shot 污染"
+                );
+            }
+            text_content = cleaned;
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
@@ -1390,7 +1468,14 @@ fn convert_assistant_message(
                         }
                         "text" => {
                             if let Some(text) = block.text {
-                                text_content.push_str(&text);
+                                // 净化「泄漏为纯文本的工具调用」，避免坏样本污染上游上下文。
+                                let (cleaned, changed) = sanitize_leaked_tool_calls(&text);
+                                if changed {
+                                    tracing::warn!(
+                                        "检测到历史 assistant 文本中的工具调用泄漏（<invoke> XML），已净化以防止 few-shot 污染"
+                                    );
+                                }
+                                text_content.push_str(&cleaned);
                             }
                         }
                         "tool_use" => {
@@ -1645,21 +1730,13 @@ mod tests {
 
     #[test]
     fn test_map_model_sonnet() {
-        assert!(
-            map_model("claude-sonnet-4-5-20250929")
-                .unwrap()
-                .contains("sonnet")
-        );
+        assert!(map_model("claude-sonnet-5-5").unwrap().contains("sonnet"));
         assert!(map_model("claude-sonnet-4-6").unwrap().contains("sonnet"));
     }
 
     #[test]
     fn test_map_model_opus() {
-        assert!(
-            map_model("claude-opus-4-5-20251101")
-                .unwrap()
-                .contains("opus")
-        );
+        assert!(map_model("claude-opus-5-5").unwrap().contains("opus"));
     }
 
     #[test]
@@ -1677,7 +1754,6 @@ mod tests {
         set_model_registry_settings(ModelRegistrySettings {
             models: default_models(),
             aliases: HashMap::new(),
-            default_model: None,
         });
         assert!(map_model("gpt-4").is_none());
     }
@@ -1688,11 +1764,10 @@ mod tests {
         set_model_registry_settings(ModelRegistrySettings {
             models: default_models(),
             aliases: HashMap::new(),
-            default_model: None,
         });
         // 命中模型表 → displayId；thinking 变体归并到基础模型
-        let base = canonical_model_display("claude-opus-4-6");
-        let thinking = canonical_model_display("claude-opus-4-6-thinking");
+        let base = canonical_model_display("claude-opus-4-8");
+        let thinking = canonical_model_display("claude-opus-4-8-thinking");
         assert_eq!(base, thinking, "thinking 变体应归并到基础模型的 displayId");
         // 未命中模型表 → 去掉 thinking 后缀的兜底名
         assert_eq!(canonical_model_display("gpt-foo-thinking"), "gpt-foo");
@@ -1704,24 +1779,24 @@ mod tests {
     fn test_map_model_alias() {
         let _lock = REGISTRY_TEST_LOCK.lock().unwrap();
         let mut aliases = HashMap::new();
-        aliases.insert("gpt-5.5".to_string(), "claude-opus-4-6".to_string());
+        aliases.insert("gpt-5.5".to_string(), "claude-opus-4-8".to_string());
         set_model_registry_settings(ModelRegistrySettings {
             models: default_models(),
             aliases,
-            default_model: None,
         });
-        assert_eq!(map_model("gpt-5.5"), Some("claude-opus-4.6".to_string()));
+        assert_eq!(map_model("gpt-5.5"), Some("claude-opus-4.8".to_string()));
     }
 
     #[test]
-    fn test_map_model_default_fallback() {
+    fn test_map_model_unmatched_returns_none() {
+        // 移除 defaultModel 兜底后：匹配不上的模型名一律返回 None，不再静默替换
         let _lock = REGISTRY_TEST_LOCK.lock().unwrap();
         set_model_registry_settings(ModelRegistrySettings {
             models: default_models(),
             aliases: HashMap::new(),
-            default_model: Some("claude-sonnet-4-6".to_string()),
         });
-        assert_eq!(map_model("gpt-5.5"), Some("claude-sonnet-4.6".to_string()));
+        assert!(map_model("gpt-5.5").is_none());
+        assert!(map_model("gpt-6-astra").is_none());
     }
 
     #[test]
@@ -1730,7 +1805,6 @@ mod tests {
         set_model_registry_settings(ModelRegistrySettings {
             models: default_models(),
             aliases: HashMap::new(),
-            default_model: None,
         });
         assert_eq!(
             map_model("claude-sonnet-4-6"),
@@ -1741,22 +1815,15 @@ mod tests {
     #[test]
     fn test_map_model_thinking_suffix_sonnet() {
         // thinking 后缀不应影响 sonnet 模型映射
-        let result = map_model("claude-sonnet-4-5-20250929-thinking");
-        assert_eq!(result, Some("claude-sonnet-4.5".to_string()));
+        let result = map_model("claude-sonnet-4-6-thinking");
+        assert_eq!(result, Some("claude-sonnet-4.6".to_string()));
     }
 
     #[test]
-    fn test_map_model_thinking_suffix_opus_4_5() {
-        // thinking 后缀不应影响 opus 4.5 模型映射
-        let result = map_model("claude-opus-4-5-20251101-thinking");
-        assert_eq!(result, Some("claude-opus-4.5".to_string()));
-    }
-
-    #[test]
-    fn test_map_model_thinking_suffix_opus_4_6() {
-        // thinking 后缀不应影响 opus 4.6 模型映射
-        let result = map_model("claude-opus-4-6-thinking");
-        assert_eq!(result, Some("claude-opus-4.6".to_string()));
+    fn test_map_model_thinking_suffix_opus_5_5() {
+        // thinking 后缀不应影响 opus 5.5 模型映射
+        let result = map_model("claude-opus-5-5-thinking");
+        assert_eq!(result, Some("claude-opus-5.5".to_string()));
     }
 
     #[test]
@@ -2838,34 +2905,32 @@ mod tests {
             Some("claude-opus-4.8".to_string())
         );
         assert_eq!(
-            map_model("claude-opus-4-7"),
-            Some("claude-opus-4.7".to_string())
+            map_model("claude-opus-5-5"),
+            Some("claude-opus-5.5".to_string())
         );
         assert_eq!(
-            map_model("claude-opus-4-6"),
-            Some("claude-opus-4.6".to_string())
-        );
-        assert_eq!(
-            map_model("claude-opus-4-5-20251101"),
-            Some("claude-opus-4.5".to_string())
+            map_model("claude-sonnet-5-5"),
+            Some("claude-sonnet-5.5".to_string())
         );
         assert_eq!(
             map_model("claude-sonnet-4-6"),
             Some("claude-sonnet-4.6".to_string())
         );
         assert_eq!(
-            map_model("claude-sonnet-4-5-20250929"),
-            Some("claude-sonnet-4.5".to_string())
-        );
-        assert_eq!(
             map_model("claude-haiku-4-5-20251001"),
             Some("claude-haiku-4.5".to_string())
         );
+        assert_eq!(
+            map_model("gpt-5.6-terra"),
+            Some("gpt-5.6-terra".to_string())
+        );
         // 点号写法同样命中
         assert_eq!(
-            map_model("claude-opus-4.6"),
-            Some("claude-opus-4.6".to_string())
+            map_model("claude-opus-5.5"),
+            Some("claude-opus-5.5".to_string())
         );
+        // 已移出默认表的旧模型不再命中
+        assert_eq!(map_model("claude-opus-4-7"), None);
         // 不支持的模型返回 None
         assert_eq!(map_model("gpt-4"), None);
     }
@@ -2874,15 +2939,11 @@ mod tests {
     fn test_default_models_context_window_parity() {
         // 1M 上下文模型
         assert_eq!(get_context_window_size("claude-opus-4-8"), 1_000_000);
-        assert_eq!(get_context_window_size("claude-opus-4-7"), 1_000_000);
-        assert_eq!(get_context_window_size("claude-opus-4-6"), 1_000_000);
+        assert_eq!(get_context_window_size("claude-opus-5-5"), 1_000_000);
+        assert_eq!(get_context_window_size("claude-sonnet-5-5"), 1_000_000);
         assert_eq!(get_context_window_size("claude-sonnet-4-6"), 1_000_000);
+        assert_eq!(get_context_window_size("gpt-5.6-luna"), 1_000_000);
         // 200K 上下文模型
-        assert_eq!(get_context_window_size("claude-opus-4-5-20251101"), 200_000);
-        assert_eq!(
-            get_context_window_size("claude-sonnet-4-5-20250929"),
-            200_000
-        );
         assert_eq!(
             get_context_window_size("claude-haiku-4-5-20251001"),
             200_000
@@ -2895,16 +2956,134 @@ mod tests {
     fn test_match_model_def_respects_order() {
         // opus 各版本应按表顺序精确命中各自版本，互不串扰
         assert_eq!(
-            map_model("claude-opus-4-6-thinking"),
-            Some("claude-opus-4.6".to_string())
+            map_model("claude-opus-5-5-thinking"),
+            Some("claude-opus-5.5".to_string())
         );
         assert_eq!(
-            map_model("claude-opus-4-7-thinking"),
-            Some("claude-opus-4.7".to_string())
+            map_model("claude-sonnet-5-5-thinking"),
+            Some("claude-sonnet-5.5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4-6-thinking"),
+            Some("claude-sonnet-4.6".to_string())
         );
         assert_eq!(
             map_model("claude-opus-4-8-thinking"),
             Some("claude-opus-4.8".to_string())
+        );
+    }
+
+    // ===== sanitize_leaked_tool_calls 工具调用泄漏净化 =====
+
+    #[test]
+    fn test_sanitize_no_leak_passthrough() {
+        // 不含 <invoke> 的普通文本原样返回
+        let text = "这是一段正常回复，讨论了 tool_use 的实现。";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(!changed);
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn test_sanitize_pure_leak_with_count_prefix() {
+        // 真实样本：整段只有 stray 前缀词 count + 一个 <invoke> 块
+        let text = "count\n<invoke name=\"Edit\">\n<parameter name=\"old_string\">明日工作计划</parameter>\n<parameter name=\"file_path\">/tmp/a.md</parameter>\n<parameter name=\"new_string\">新计划</parameter>\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_sanitize_prose_then_leak() {
+        // 真实样本：正常散文 + \n\ncount\n<invoke>，散文要保留
+        let text = "admin 模块编译通过。现在验证 SQL 不回归。\n\ncount\n<invoke name=\"Bash\">\n<parameter name=\"command\">mvn test</parameter>\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "admin 模块编译通过。现在验证 SQL 不回归。");
+    }
+
+    #[test]
+    fn test_sanitize_other_prefix_words() {
+        // 前缀词不固定：core / county / card 都要能剥
+        for prefix in ["core", "county", "card", "course", "court"] {
+            let text = format!(
+                "前置说明。\n\n{prefix}\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>"
+            );
+            let (out, changed) = sanitize_leaked_tool_calls(&text);
+            assert!(changed, "prefix={prefix} 应被净化");
+            assert_eq!(out, "前置说明。", "prefix={prefix}");
+        }
+    }
+
+    #[test]
+    fn test_sanitize_no_prefix_word() {
+        // 无 stray 前缀词，直接 <invoke>
+        let text = "说明文字。\n<invoke name=\"Read\">\n<parameter name=\"file_path\">/a</parameter>\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "说明文字。");
+    }
+
+    #[test]
+    fn test_sanitize_multiple_invokes() {
+        // 单块多个 <invoke>
+        let text = "count\n<invoke name=\"Bash\">\n<parameter name=\"command\">a</parameter>\n</invoke>\n<invoke name=\"Bash\">\n<parameter name=\"command\">b</parameter>\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_sanitize_paramless_invoke() {
+        // 无参数变体：<invoke name="X">\n</invoke>
+        let text = "准备退出计划模式。\n<invoke name=\"ExitPlanMode\">\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "准备退出计划模式。");
+    }
+
+    #[test]
+    fn test_sanitize_truncated_no_closing_tag() {
+        // 截断变体：无 </invoke>，从 <invoke 剥到末尾
+        let text = "开始写文件。\ncount\n<invoke name=\"Write\">\n<parameter name=\"content\">很长的内容被截断了……";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "开始写文件。");
+    }
+
+    #[test]
+    fn test_sanitize_preserves_value_with_special_chars() {
+        // 参数值里含 < > & 换行、shell 重定向，剥块不受影响，散文完整保留
+        let text = "跑测试。\n\ncount\n<invoke name=\"Bash\">\n<parameter name=\"command\">mvn test 2>&1 | grep -E \"a<b\"</parameter>\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "跑测试。");
+    }
+
+    #[test]
+    fn test_sanitize_does_not_strip_long_prose_line_as_prefix() {
+        // 前缀行不是短单词（含中文/空格/超长），不应被当 stray 前缀剥掉
+        let text = "这一行是正常的中文说明，不该被当作前缀词\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>";
+        let (out, changed) = sanitize_leaked_tool_calls(text);
+        assert!(changed);
+        assert_eq!(out, "这一行是正常的中文说明，不该被当作前缀词");
+    }
+
+    #[test]
+    fn test_convert_assistant_message_sanitizes_leak() {
+        // 端到端：泄漏文本经 convert_assistant_message 后，content 里不含 <invoke>
+        let msg = super::super::types::Message {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "text", "text": "count\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>"}
+            ]),
+        };
+        let mut map = HashMap::new();
+        let result = convert_assistant_message(&msg, &mut map).unwrap();
+        let content = result.assistant_response_message.content;
+        assert!(
+            !content.contains("<invoke"),
+            "净化后不应含 <invoke>，实际: {content:?}"
         );
     }
 }

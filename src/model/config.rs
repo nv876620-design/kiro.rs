@@ -309,8 +309,7 @@ pub struct Config {
     ///
     /// When enabled, credentials disabled for `QuotaExceeded` are probed on
     /// balance refresh: if the quota reset time has passed and remaining
-    /// quota is positive, the credential is re-enabled automatically
-    /// (upstream feat: quota reset recovery toggle).
+    /// quota is positive, the credential is re-enabled automatically.
     #[serde(default)]
     pub quota_reset_recovery_enabled: bool,
 
@@ -372,17 +371,10 @@ pub struct Config {
 
     /// OpenAI/Codex 等客户端模型名 → 本服务模型名（displayId / kiroId / 别名）的显式映射。
     ///
-    /// 键比较时不区分大小写。例如 Codex 发送 `gpt-5.5` 时可映射到 `claude-opus-4-6`。
+    /// 键比较时不区分大小写。例如 Codex 发送 `gpt-5.5` 时可映射到 `gpt-5.6-terra`。
     #[serde(default)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub model_aliases: HashMap<String, String>,
-
-    /// 未命中任何模型规则时的回退模型名（displayId / kiroId / 别名）。
-    ///
-    /// 适用于 Codex 等固定发送 `gpt-5.x` 但后端实际走 Claude/Kiro 的场景。
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
 
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
@@ -471,11 +463,6 @@ fn default_trigger_lines() -> u32 {
 /// 顺序即匹配优先级（与原 `map_model` 的 if-else 顺序一致）。
 /// `get_models` / `map_model` / `get_context_window_size` 在配置未提供 `models` 时回退到此表。
 pub fn default_models() -> Vec<ModelDef> {
-    // NOTE: order is match priority for the fuzzy family+version fallback.
-    // Multi-component versions (4.8, 5.5) must precede single-digit ones
-    // ("5" would substring-match any "...-4-5..." name), and 4.x must
-    // precede 5.x for the same reason. Exact display_id/kiro_id matches
-    // always win regardless of order.
     vec![
         ModelDef {
             family: "opus".to_string(),
@@ -489,82 +476,22 @@ pub fn default_models() -> Vec<ModelDef> {
         },
         ModelDef {
             family: "opus".to_string(),
-            version: Some("4.7".to_string()),
-            kiro_id: "claude-opus-4.7".to_string(),
-            display_id: "claude-opus-4-7".to_string(),
-            display_name: "Claude Opus 4.7".to_string(),
-            created: 1776276000,
-            max_tokens: 64000,
-            context_window: 1_000_000,
-        },
-        ModelDef {
-            family: "opus".to_string(),
-            version: Some("4.6".to_string()),
-            kiro_id: "claude-opus-4.6".to_string(),
-            display_id: "claude-opus-4-6".to_string(),
-            display_name: "Claude Opus 4.6".to_string(),
-            created: 1770163200,
-            max_tokens: 64000,
-            context_window: 1_000_000,
-        },
-        ModelDef {
-            family: "opus".to_string(),
-            version: Some("4.5".to_string()),
-            kiro_id: "claude-opus-4.5".to_string(),
-            display_id: "claude-opus-4-5-20251101".to_string(),
-            display_name: "Claude Opus 4.5".to_string(),
-            created: 1763942400,
-            max_tokens: 64000,
-            context_window: 200_000,
-        },
-        ModelDef {
-            family: "opus".to_string(),
             version: Some("5.5".to_string()),
             kiro_id: "claude-opus-5.5".to_string(),
             display_id: "claude-opus-5-5".to_string(),
             display_name: "Claude Opus 5.5".to_string(),
-            created: 1780000000,
-            max_tokens: 64000,
-            context_window: 1_000_000,
-        },
-        ModelDef {
-            family: "opus".to_string(),
-            version: Some("5".to_string()),
-            kiro_id: "claude-opus-5".to_string(),
-            display_id: "claude-opus-5".to_string(),
-            display_name: "Claude Opus 5".to_string(),
             created: 1776276000,
-            max_tokens: 64000,
+            max_tokens: 128_000,
             context_window: 1_000_000,
         },
         ModelDef {
             family: "sonnet".to_string(),
-            version: Some("4.6".to_string()),
-            kiro_id: "claude-sonnet-4.6".to_string(),
-            display_id: "claude-sonnet-4-6".to_string(),
-            display_name: "Claude Sonnet 4.6".to_string(),
-            created: 1784249340,
-            max_tokens: 64000,
-            context_window: 1_000_000,
-        },
-        ModelDef {
-            family: "sonnet".to_string(),
-            version: Some("4.5".to_string()),
-            kiro_id: "claude-sonnet-4.5".to_string(),
-            display_id: "claude-sonnet-4-5-20250929".to_string(),
-            display_name: "Claude Sonnet 4.5".to_string(),
-            created: 1759104000,
-            max_tokens: 64000,
-            context_window: 200_000,
-        },
-        ModelDef {
-            family: "sonnet".to_string(),
-            version: Some("5".to_string()),
-            kiro_id: "claude-sonnet-5".to_string(),
-            display_id: "claude-sonnet-5".to_string(),
-            display_name: "Claude Sonnet 5".to_string(),
+            version: Some("5.5".to_string()),
+            kiro_id: "claude-sonnet-5.5".to_string(),
+            display_id: "claude-sonnet-5-5".to_string(),
+            display_name: "Claude Sonnet 5.5".to_string(),
             created: 1771286400,
-            max_tokens: 64000,
+            max_tokens: 128_000,
             context_window: 1_000_000,
         },
         ModelDef {
@@ -584,7 +511,7 @@ pub fn default_models() -> Vec<ModelDef> {
             display_id: "gpt-5.6-sol".to_string(),
             display_name: "GPT 5.6 Sol".to_string(),
             created: 1784000381,
-            max_tokens: 64000,
+            max_tokens: 128_000,
             context_window: 1_000_000,
         },
         ModelDef {
@@ -594,7 +521,7 @@ pub fn default_models() -> Vec<ModelDef> {
             display_id: "gpt-5.6-terra".to_string(),
             display_name: "GPT 5.6 Terra".to_string(),
             created: 1784000462,
-            max_tokens: 64000,
+            max_tokens: 128_000,
             context_window: 1_000_000,
         },
         ModelDef {
@@ -604,7 +531,17 @@ pub fn default_models() -> Vec<ModelDef> {
             display_id: "gpt-5.6-luna".to_string(),
             display_name: "GPT 5.6 Luna".to_string(),
             created: 1784000499,
-            max_tokens: 64000,
+            max_tokens: 128_000,
+            context_window: 1_000_000,
+        },
+        ModelDef {
+            family: "sonnet".to_string(),
+            version: Some("4.6".to_string()),
+            kiro_id: "claude-sonnet-4.6".to_string(),
+            display_id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
+            created: 1784249340,
+            max_tokens: 128_000,
             context_window: 1_000_000,
         },
     ]
@@ -650,7 +587,6 @@ impl Default for Config {
             endpoints: HashMap::new(),
             models: None,
             model_aliases: HashMap::new(),
-            default_model: None,
             config_path: None,
         }
     }
@@ -859,8 +795,7 @@ mod tests {
     }
 
     /// config.example.json 是桌面版首启模板，展示的是「当前推荐」模型组合；
-    /// default_models() 是未配置 models 时的请求兜底表，需要长期保留旧模型 ID
-    /// 以免旧客户端请求（如 claude-opus-4-7）失效。两者收录的模型集合可以不同，
+    /// default_models() 是未配置 models 时的请求兜底表。两者收录的模型集合可以不同，
     /// 这里只校验两边同时出现的模型（按 kiro_id 匹配）字段没有互相冲突，
     /// 避免样例和默认表各自维护出两份不一致的同名模型定义。
     #[test]

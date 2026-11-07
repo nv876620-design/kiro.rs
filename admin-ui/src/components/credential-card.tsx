@@ -21,6 +21,14 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
 import {
+  credentialTitle,
+  formatAmount,
+  isPassthroughKind,
+  passthroughKindLabel,
+  remainingIndicatorClass,
+  remainingPercentage,
+} from '@/lib/credential'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -87,18 +95,6 @@ function authMethodLabel(method: string | null | undefined): string | null {
       return 'Social'
     default:
       return method
-  }
-}
-
-// Passthrough credential type label (Kiro credentials return null, not shown)
-function passthroughKindLabel(kind: string | null | undefined): string | null {
-  switch (kind) {
-    case 'anthropic':
-      return 'Claude Passthrough'
-    case 'openai':
-      return 'Codex Passthrough'
-    default:
-      return null
   }
 }
 
@@ -255,13 +251,13 @@ export function CredentialCard({
   const dot = healthDot[health]
   const authLabel = authMethodLabel(credential.authMethod)
   const kindLabel = passthroughKindLabel(credential.kind)
-  const isPassthrough = kindLabel !== null
+  const isPassthrough = isPassthroughKind(credential.kind)
   const rpmUsage = formatRpmUsage(credential.rpm)
   const hasFailure = credential.failureCount > 0 || credential.refreshFailureCount > 0
-  const title = credential.name || credential.email || `Credential #${credential.id}`
-  // Show #ID in subtitle only when custom name or email is used as title, to avoid "Credential #3 / #3" duplication
+  const title = credentialTitle(credential)
+  // Show #ID in subtitle only when a custom name or email is used as title, avoiding "Credential #3 / #3" duplication
   const showIdInSub = Boolean(credential.name || credential.email)
-  const remainingPct = balance ? 100 - balance.usagePercentage : null
+  const remainingPct = balance ? remainingPercentage(balance) : null
 
   return (
     <>
@@ -411,7 +407,7 @@ export function CredentialCard({
                     )}
                   >
                     <span className="mr-0.5 text-xs font-normal text-muted-foreground">$</span>
-                    {balance.remaining.toFixed(2)}
+                    {formatAmount(balance.remaining)}
                   </span>
                 ) : (
                   <span className="text-xs text-muted-foreground">Unknown</span>
@@ -440,10 +436,6 @@ export function CredentialCard({
                 </div>
                 {loadingBalance ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                ) : balance && balance.usageLimit <= 0 && (balance.subscriptionTitle?.toLowerCase().includes('enterprise') || balance.subscriptionTitle?.toLowerCase().includes('idc')) ? (
-                  <span className="text-sm font-semibold text-green-600 dark:text-green-400">
-                    Enterprise Active
-                  </span>
                 ) : remainingPct !== null ? (
                   <span className="text-lg font-bold leading-none tabular-nums">
                     {remainingPct.toFixed(0)}
@@ -454,29 +446,17 @@ export function CredentialCard({
                 )}
               </div>
               {balance && !loadingBalance ? (
-                balance.usageLimit <= 0 && (balance.subscriptionTitle?.toLowerCase().includes('enterprise') || balance.subscriptionTitle?.toLowerCase().includes('idc')) ? (
-                  <div className="mt-1.5 text-[11px] text-muted-foreground">
-                    Managed via IAM Identity Center (Unlimited quota)
+                <>
+                  <Progress
+                    value={remainingPct ?? 0}
+                    max={100}
+                    className="mt-2 h-1.5"
+                    indicatorClassName={remainingIndicatorClass(remainingPct ?? 0)}
+                  />
+                  <div className="mt-1.5 text-right text-[11px] text-muted-foreground tabular-nums">
+                    Left {formatAmount(balance.remaining)} / {formatAmount(balance.usageLimit)}
                   </div>
-                ) : (
-                  <>
-                    <Progress
-                      value={remainingPct ?? 0}
-                      max={100}
-                      className="mt-2 h-1.5"
-                      indicatorClassName={
-                        (remainingPct ?? 0) < 20
-                          ? 'bg-destructive'
-                          : (remainingPct ?? 0) < 40
-                            ? 'bg-warning'
-                            : 'bg-success'
-                      }
-                    />
-                    <div className="mt-1.5 text-right text-[11px] text-muted-foreground tabular-nums">
-                      Left {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
-                    </div>
-                  </>
-                )
+                </>
               ) : (
                 !loadingBalance && (
                   <div className="mt-1.5 text-[11px] text-muted-foreground">

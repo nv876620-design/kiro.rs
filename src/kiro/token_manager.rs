@@ -389,7 +389,9 @@ pub(crate) async fn get_usage_limits(
     let mut last_error = String::new();
     for region in [primary_region, fallback_region] {
         for &with_profile_arn in &profile_arn_attempts {
-            match get_usage_limits_rest(credentials, config, token, proxy, region, with_profile_arn).await {
+            match get_usage_limits_rest(credentials, config, token, proxy, region, with_profile_arn)
+                .await
+            {
                 Ok(data) => return Ok(data),
                 Err(error) => {
                     let message = error.to_string();
@@ -439,10 +441,7 @@ async fn get_usage_limits_rest(
         "aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-{}-{}",
         kiro_version, machine_id
     );
-    let amz_user_agent = format!(
-        "aws-sdk-js/1.0.18 KiroIDE {} {}",
-        kiro_version, machine_id
-    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.18 KiroIDE {} {}", kiro_version, machine_id);
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
@@ -500,10 +499,11 @@ async fn get_user_info_cbor(
         kiro_version,
         machine_id
     );
-    let amz_user_agent = format!("aws-sdk-js/{} KiroIDE {} {}", runtime_ver, kiro_version, machine_id);
-    let body = CborUserInfoRequest {
-        origin: "KIRO_IDE",
-    };
+    let amz_user_agent = format!(
+        "aws-sdk-js/{} KiroIDE {} {}",
+        runtime_ver, kiro_version, machine_id
+    );
+    let body = CborUserInfoRequest { origin: "KIRO_IDE" };
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&body, &mut encoded)?;
 
@@ -2389,10 +2389,7 @@ impl MultiTokenManager {
         };
 
         if !new_cred.is_passthrough() {
-            let duplicate_hash = new_cred
-                .refresh_token
-                .as_deref()
-                .map(sha256_hex);
+            let duplicate_hash = new_cred.refresh_token.as_deref().map(sha256_hex);
             if let Some(hash) = duplicate_hash {
                 let entries = self.entries.lock();
                 if entries.iter().any(|entry| {
@@ -2508,9 +2505,14 @@ impl MultiTokenManager {
 
         // GetUserInfo is non-fatal; it lets IdC/social credentials persist the
         // email even when the usage endpoint rejects the account.
-        let user_info = get_user_info_cbor(&credentials, &self.config(), &token, effective_proxy.as_ref())
-            .await
-            .ok();
+        let user_info = get_user_info_cbor(
+            &credentials,
+            &self.config(),
+            &token,
+            effective_proxy.as_ref(),
+        )
+        .await
+        .ok();
         if let Some(ref user_info) = user_info {
             if let Some(email) = user_info
                 .email
@@ -2535,7 +2537,10 @@ impl MultiTokenManager {
 
                 if changed {
                     if let Err(e) = self.persist_credentials() {
-                        tracing::warn!("Email update persistence failed (does not affect this request): {}", e);
+                        tracing::warn!(
+                            "Email update persistence failed (does not affect this request): {}",
+                            e
+                        );
                     }
                 }
             }
@@ -2550,7 +2555,11 @@ impl MultiTokenManager {
         .await
         {
             Ok(limits) => limits,
-            Err(e) if credentials.is_idc() && (e.to_string().contains("Invalid profileArn") || e.to_string().contains("403")) => {
+            Err(e)
+                if credentials.is_idc()
+                    && (e.to_string().contains("Invalid profileArn")
+                        || e.to_string().contains("403")) =>
+            {
                 tracing::info!(
                     "凭据 #{} (is_idc={}) 查询使用额度返回: {}，回退为 IdC / Enterprise 免限额响应",
                     id,
@@ -2613,12 +2622,7 @@ impl MultiTokenManager {
                     let old_email = entry.credentials.email.clone();
                     if old_email.as_deref().map(str::trim) != Some(email) {
                         entry.credentials.email = Some(email.to_string());
-                        tracing::info!(
-                            "凭据 #{} 邮箱已更新: {:?} -> {}",
-                            id,
-                            old_email,
-                            email
-                        );
+                        tracing::info!("凭据 #{} 邮箱已更新: {:?} -> {}", id, old_email, email);
                         true
                     } else {
                         false
@@ -2656,6 +2660,18 @@ impl MultiTokenManager {
             .find(|e| e.id == id)
             .map(|e| e.credentials.is_passthrough())
             .unwrap_or(false)
+    }
+
+    /// 克隆全部凭据（含敏感字段，供 Admin 导出使用），按 `(priority, id)` 排序
+    pub fn credentials_for_export(&self) -> Vec<(u64, KiroCredentials)> {
+        let mut list: Vec<(u64, KiroCredentials)> = self
+            .entries
+            .lock()
+            .iter()
+            .map(|e| (e.id, e.credentials.clone()))
+            .collect();
+        list.sort_by_key(|(id, c)| (c.priority, *id));
+        list
     }
 
     /// 获取透传凭据的余额（Admin API）
@@ -3075,10 +3091,7 @@ impl MultiTokenManager {
     /// Enable/disable monthly-quota auto-recovery and persist to config file.
     pub fn set_quota_reset_recovery_enabled(&self, enabled: bool) -> anyhow::Result<()> {
         use anyhow::Context;
-        let config_path = self
-            .config()
-            .config_path()
-            .map(|p| p.to_path_buf());
+        let config_path = self.config().config_path().map(|p| p.to_path_buf());
         let Some(config_path) = config_path else {
             let mut cfg = (*self.config()).clone();
             cfg.quota_reset_recovery_enabled = enabled;
@@ -3088,9 +3101,12 @@ impl MultiTokenManager {
         let mut config = Config::load(&config_path)
             .with_context(|| format!("Failed to reload config: {}", config_path.display()))?;
         config.quota_reset_recovery_enabled = enabled;
-        config
-            .save()
-            .with_context(|| format!("Failed to persist quota reset recovery flag: {}", config_path.display()))?;
+        config.save().with_context(|| {
+            format!(
+                "Failed to persist quota reset recovery flag: {}",
+                config_path.display()
+            )
+        })?;
         self.replace_config(config);
         tracing::info!("Quota reset recovery set to: {}", enabled);
         Ok(())
@@ -3130,7 +3146,10 @@ impl MultiTokenManager {
     /// 获取所有 credentials 条目元数据（包含 id、credentials 与 disabled 状态，用于 Admin API）
     pub fn get_credentials_entries(&self) -> Vec<(u64, KiroCredentials, bool)> {
         let entries = self.entries.lock();
-        entries.iter().map(|e| (e.id, e.credentials.clone(), e.disabled)).collect()
+        entries
+            .iter()
+            .map(|e| (e.id, e.credentials.clone(), e.disabled))
+            .collect()
     }
 
     /// 获取全局代理配置

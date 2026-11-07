@@ -224,9 +224,12 @@ where
         serde_json::Value::Number(number) => {
             let raw = number.as_i64()?;
             // KAM 使用毫秒时间戳；为兼容部分旧导出也接受秒级时间戳。
-            let millis = if raw > 10_000_000_000 { raw } else { raw * 1000 };
-            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
-                .map(|dt| dt.to_rfc3339())
+            let millis = if raw > 10_000_000_000 {
+                raw
+            } else {
+                raw * 1000
+            };
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis).map(|dt| dt.to_rfc3339())
         }
         _ => None,
     }))
@@ -391,6 +394,49 @@ pub struct ExportedCredentials {
     pub subscription_title: Option<String>,
 }
 
+// ============ AWS SSO 凭据导出 ============
+
+/// 导出 AWS SSO（IdC）凭据请求
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSsoCredentialsRequest {
+    /// 要导出的凭据 ID；为空或缺省表示导出全部 IdC 凭据
+    #[serde(default)]
+    pub ids: Option<Vec<u64>>,
+}
+
+/// 单条导出的 AWS SSO 凭据（字段与 AWS SSO 导入对话框保持一致，可直接回导）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SsoExportItem {
+    pub refresh_token: String,
+    pub client_id: String,
+    pub client_secret: String,
+    /// 认证区域（凭据级 authRegion > region > 全局配置）
+    pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// 导出 AWS SSO 凭据响应（即导出文件内容）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSsoCredentialsResponse {
+    /// 文件类型标识，导入时据此识别
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub version: u32,
+    /// 导出时间（RFC3339）
+    pub exported_at: String,
+    /// 被跳过的凭据数（非 IdC 或字段不全）
+    pub skipped: usize,
+    pub credentials: Vec<SsoExportItem>,
+}
+
 // ============ 余额查询 ============
 
 /// 余额查询响应
@@ -464,9 +510,6 @@ pub struct AppConfigResponse {
     pub streaming_sdk_version: String,
     /// 模型列表（生效值，缺省时为内置默认表）
     pub models: Vec<ModelDef>,
-    /// OpenAI/Codex 未识别模型名的回退目标（displayId / kiroId）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
     /// 客户端模型名 → 本服务模型名
     pub model_aliases: HashMap<String, String>,
     /// Write/Edit 分块写入策略
@@ -521,9 +564,6 @@ pub struct UpdateAppConfigRequest {
     pub streaming_sdk_version: String,
     /// 模型列表（至少一个）
     pub models: Vec<ModelDef>,
-    /// OpenAI/Codex 未识别模型名的回退目标
-    #[serde(default)]
-    pub default_model: Option<String>,
     /// 客户端模型名 → 本服务模型名
     #[serde(default)]
     pub model_aliases: HashMap<String, String>,

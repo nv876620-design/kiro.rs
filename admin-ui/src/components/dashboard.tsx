@@ -92,6 +92,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const startIndex = (currentPage - 1) * itemsPerPage
   const endIndex = startIndex + itemsPerPage
   const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
+  const selectedCredential =
+    data?.credentials.find(credential => credential.id === selectedCredentialId) ?? null
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
@@ -166,6 +168,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const handleViewBalance = (id: number) => {
     setSelectedCredentialId(id)
     setBalanceDialogOpen(true)
+  }
+
+  // 弹窗查到新余额后同步进列表缓存，保证卡片与弹窗展示同一份数据
+  const handleBalanceLoaded = (id: number, balance: BalanceResponse) => {
+    setBalanceMap(prev => {
+      if (prev.get(id) === balance) return prev
+      const next = new Map(prev)
+      next.set(id, balance)
+      return next
+    })
   }
 
   const handleRefresh = () => {
@@ -912,7 +924,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
               </Button>
               <Button onClick={() => setAwsSsoImportDialogOpen(true)} size="sm" variant="outline">
                 <FileUp className="h-4 w-4 mr-2" />
-                AWS SSO Import
+                AWS SSO Import / Export
               </Button>
               <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
                 <Upload className="h-4 w-4 mr-2" />
@@ -992,9 +1004,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
       {/* Balance dialog */}
       <BalanceDialog
-        credentialId={selectedCredentialId}
+        credential={selectedCredential}
+        cachedBalance={selectedCredentialId !== null ? balanceMap.get(selectedCredentialId) ?? null : null}
         open={balanceDialogOpen}
         onOpenChange={setBalanceDialogOpen}
+        onBalanceLoaded={handleBalanceLoaded}
       />
 
       {/* Add credential dialog */}
@@ -1019,6 +1033,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <AwsSsoImportDialog
         open={awsSsoImportDialogOpen}
         onOpenChange={setAwsSsoImportDialogOpen}
+        selectedIds={selectedIds}
       />
 
       {/* Settings dialog */}

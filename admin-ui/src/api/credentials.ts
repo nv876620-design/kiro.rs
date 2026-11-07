@@ -19,6 +19,7 @@ import type {
   ImportCredentialsResponse,
   UpdateCredentialRequest,
   AvailableModelsResponse,
+  SsoExportFile,
 } from '@/types/api'
 
 // Create the axios instance
@@ -138,6 +139,12 @@ export async function addCredential(
   req: AddCredentialRequest
 ): Promise<AddCredentialResponse> {
   const { data } = await api.post<AddCredentialResponse>('/credentials', req)
+  return data
+}
+
+// 导出 AWS SSO（IdC）凭据（含明文 refreshToken/clientSecret）；ids 为空表示导出全部
+export async function exportSsoCredentials(ids?: number[]): Promise<SsoExportFile> {
+  const { data } = await api.post<SsoExportFile>('/credentials/export/sso', { ids })
   return data
 }
 

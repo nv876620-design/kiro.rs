@@ -999,10 +999,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(
-            cred.effective_api_region(&Config::default()),
-            "us-east-1"
-        );
+        assert_eq!(cred.effective_api_region(&Config::default()), "us-east-1");
     }
 
     #[test]

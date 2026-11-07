@@ -634,10 +634,7 @@ pub(crate) fn map_provider_error(err: Error, passthrough_retry_after: bool) -> R
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse::new(
                         "invalid_request_error",
-                        format!(
-                            "{} Use GET /v1/models to list supported models.",
-                            detail
-                        ),
+                        format!("{} Use GET /v1/models to list supported models.", detail),
                     )),
                 )
                     .into_response();

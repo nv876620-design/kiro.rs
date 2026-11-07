@@ -2,10 +2,10 @@
 //!
 //! 从 Kiro API 获取可用模型列表
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::http_client::{build_client, ProxyConfig};
+use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::model::config::Config;
@@ -68,10 +68,7 @@ pub async fn fetch_kiro_models(
         "aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-{}-{}",
         kiro_version, machine_id
     );
-    let amz_user_agent = format!(
-        "aws-sdk-js/1.0.18 KiroIDE {} {}",
-        kiro_version, machine_id
-    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.18 KiroIDE {} {}", kiro_version, machine_id);
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
@@ -130,10 +127,7 @@ async fn fetch_kiro_models_internal(
     let mut next_token: Option<String> = None;
 
     loop {
-        let mut params = vec![
-            ("origin", "AI_EDITOR"),
-            ("maxResults", "50"),
-        ];
+        let mut params = vec![("origin", "AI_EDITOR"), ("maxResults", "50")];
 
         if include_profile_arn {
             if let Some(profile_arn) = &credentials.profile_arn {
@@ -180,7 +174,11 @@ async fn fetch_kiro_models_internal(
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            bail!("ListAvailableModels failed with status {}: {}", status, body);
+            bail!(
+                "ListAvailableModels failed with status {}: {}",
+                status,
+                body
+            );
         }
 
         let data: ListModelsResponse = response
