@@ -243,9 +243,27 @@ export interface BalanceResponse {
   available: boolean
 }
 
+// Token limits reported by Kiro's ListAvailableModels API
+export interface KiroTokenLimits {
+  maxInputTokens?: number
+  maxOutputTokens?: number
+}
+
+// Model detail reported by Kiro's ListAvailableModels API
+export interface KiroModelDetail {
+  modelId: string
+  modelName: string
+  description?: string
+  supportedInputTypes?: string[]
+  tokenLimits?: KiroTokenLimits
+  rateMultiplier?: number
+  rateUnit?: string
+}
+
 // Available models response
 export interface AvailableModelsResponse {
   anthropicModels: string[]
+  anthropicModelDetails?: KiroModelDetail[]
   openaiModels: string[]
 }
 

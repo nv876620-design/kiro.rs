@@ -40,7 +40,7 @@ import {
 } from '@/lib/desktop'
 import { storage } from '@/lib/storage'
 import { Monitor, FileUp, FileDown } from 'lucide-react'
-import type { ModelDef } from '@/types/api'
+import type { KiroModelDetail, ModelDef } from '@/types/api'
 
 // Settings group tabs
 type SettingsTab = 'general' | 'rpm' | 'write' | 'fingerprint' | 'models' | 'desktop'
@@ -135,6 +135,78 @@ function parseImportedModels(text: string): { models: ModelDef[]; invalid: numbe
     models.push(m)
   }
   return { models, invalid }
+}
+
+// Kiro IDs use "claude-<family>-<version>" (e.g. claude-sonnet-4.5).
+// Non-Claude IDs are matched exactly by using the whole ID as the family.
+function splitKiroModelId(kiroId: string): { family: string; version: string | null } {
+  const trimmed = kiroId.trim()
+  const claude = /^claude-([a-z]+)-(.+)$/i.exec(trimmed)
+  if (claude) {
+    return { family: claude[1].toLowerCase(), version: claude[2] }
+  }
+  return { family: trimmed, version: null }
+}
+
+function prettyModelId(kiroId: string): string {
+  return kiroId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => (/^[a-z]/i.test(part) ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(' ')
+}
+
+function modelDefFromFetchedId(kiroId: string): ModelDef {
+  const { family, version } = splitKiroModelId(kiroId)
+  return {
+    family,
+    version,
+    kiroId: kiroId.trim(),
+    displayId: kiroId.trim(),
+    displayName: prettyModelId(kiroId),
+    created: Math.floor(Date.now() / 1000),
+    maxTokens: 64000,
+    contextWindow: 200000,
+  }
+}
+
+// Build a ModelDef from the real ListAvailableModels metadata so the token
+// limits and display name match what the account is actually entitled to.
+function modelDefFromFetchedDetail(detail: KiroModelDetail): ModelDef {
+  const base = modelDefFromFetchedId(detail.modelId)
+  return {
+    ...base,
+    displayName: detail.modelName?.trim() || base.displayName,
+    maxTokens: detail.tokenLimits?.maxOutputTokens ?? base.maxTokens,
+    contextWindow: detail.tokenLimits?.maxInputTokens ?? base.contextWindow,
+  }
+}
+
+// Merge discovered models into the editable list, skipping any kiroId that is
+// already configured. Returns the new list plus how many entries were added.
+function mergeDiscoveredModels(
+  current: ModelDef[],
+  details: KiroModelDetail[] | undefined,
+  ids: string[] | undefined,
+): { next: ModelDef[]; added: number } {
+  const existing = new Set(current.map((m) => m.kiroId.trim().toLowerCase()))
+  const detailsById = new Map(
+    (details ?? []).map((d) => [d.modelId.trim().toLowerCase(), d]),
+  )
+  const candidates = details?.length ? details.map((d) => d.modelId) : (ids ?? [])
+  const next = [...current]
+  let added = 0
+
+  for (const id of candidates) {
+    const key = id.trim().toLowerCase()
+    if (!key || existing.has(key)) continue
+    existing.add(key)
+    const detail = detailsById.get(key)
+    next.push(detail ? modelDefFromFetchedDetail(detail) : modelDefFromFetchedId(id))
+    added++
+  }
+
+  return { next, added }
 }
 
 function rowsToAliases(rows: ModelAliasRow[]): Record<string, string> {
@@ -944,12 +1016,32 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     className="h-7 text-xs text-muted-foreground hover:text-foreground"
                     disabled={isFetchingModels}
                     onClick={async () => {
-                      const res = await refetchAvailableModels()
-                      const count = res.data?.anthropicModels?.length ?? 0
-                      if (count > 0) {
-                        toast.success(`Discovered ${count} models from credentials`)
-                      } else {
-                        toast.info('No models returned from credentials')
+                      try {
+                        const res = await refetchAvailableModels()
+                        const data = res.data
+                        const count = data?.anthropicModels?.length ?? 0
+                        if (count === 0) {
+                          toast.info('No models returned from credentials')
+                          return
+                        }
+                        const { next, added } = mergeDiscoveredModels(
+                          models,
+                          data?.anthropicModelDetails,
+                          data?.anthropicModels,
+                        )
+                        if (added === 0) {
+                          toast.success(
+                            `Discovered ${count} models; all are already in the model list`,
+                          )
+                          return
+                        }
+                        setModels(next)
+                        setModelsExpanded(true)
+                        toast.success(
+                          `Discovered ${count} models; added ${added} to the model list. Click "Save & Apply" to keep them.`,
+                        )
+                      } catch (e) {
+                        toast.error(`Failed to fetch models: ${extractErrorMessage(e)}`)
                       }
                     }}
                     title="Fetch available models from active credentials"

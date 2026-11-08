@@ -1382,9 +1382,12 @@ impl AdminService {
     /// 获取可用模型列表（从所有 credentials 实时获取）
     pub async fn get_available_models(&self) -> super::types::AvailableModelsResponse {
         use crate::kiro::list_models::fetch_kiro_models;
-        use std::collections::HashSet;
+        use std::collections::{BTreeMap, HashSet};
 
         let mut all_model_ids = HashSet::new();
+        // modelId -> 模型详情。用于让 Admin UI 依据真实 token 上限/展示名
+        // 把发现的模型并入可编辑模型列表，而不是仅返回裸 ID。
+        let mut all_model_details = BTreeMap::new();
         let config = self.token_manager.config();
         let entries = self.token_manager.get_credentials_entries();
 
@@ -1446,7 +1449,10 @@ impl AdminService {
                             region
                         );
                         for model in models {
-                            all_model_ids.insert(model.model_id);
+                            all_model_ids.insert(model.model_id.clone());
+                            all_model_details
+                                .entry(model.model_id.clone())
+                                .or_insert(model);
                         }
                         fetched_any = true;
                         success_for_this = true;
@@ -1491,6 +1497,7 @@ impl AdminService {
 
         super::types::AvailableModelsResponse {
             anthropic_models,
+            anthropic_model_details: all_model_details.into_values().collect(),
             openai_models,
         }
     }

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::kiro::list_models::KiroModel;
 use crate::model::config::{ChunkedWritePolicy, ModelDef};
 
 // ============ 凭据状态 ============
@@ -775,6 +776,8 @@ impl AdminErrorResponse {
 pub struct AvailableModelsResponse {
     /// Anthropic/Kiro 凭据中的模型
     pub anthropic_models: Vec<String>,
+    /// Anthropic/Kiro 模型详情（含展示名与 token 上限，按 modelId 去重）
+    pub anthropic_model_details: Vec<KiroModel>,
     /// OpenAI 透传凭据中的模型
     pub openai_models: Vec<String>,
 }
